@@ -1,0 +1,19 @@
+{
+  "idem_key": "artifact:art-123:v1",
+  "kind": "document",
+  "source_type": "artifact",
+  "source_ref": {
+    "artifact_id": "art-123",
+    "task_id": "task-1",
+    "node_id": "draft",
+    "revision": "1"
+  },
+  "labels": {
+    "__op:area_id": "area-123",
+    "__op:room_key": "writer",
+    "__sem:topic": "billing"
+  },
+  "location_id": "loc-billing",
+  "storage_uri": "row://artifacts/art-123?field=content",
+  "format": "json"
+}
