@@ -1,0 +1,40 @@
+{
+  "engine_intent_record": {
+    "envelope": {
+      "producer": "claude_opus_4_7",
+      "produced_at": "2026-05-25T16:00:00Z",
+      "expires_at": "2026-11-25T00:00:00Z",
+      "source_kind": "user_testimony",
+      "audience": [
+        "database_engine_architect",
+        "backend_engineer_doing_storage_layer",
+        "nailforge_world_model_team",
+        "vector_rag_implementor"
+      ],
+      "confidence": 0.85
+    },
+    "raw_brief": "项目: box_transaction_layer — 为 box-model (已有 KM dumb storage) 加事务层。已有 box-model 状态 (Phase 0+1+R0.10 done · 224 测试): Item / Symbol(R0.7, 7 SymbolKind, 25 原生符号) / View(7 perspective); FileStore(journal-replay 持久化); R0.10 操作层: Task = Item(kind=task), content 含 source/goal/pass_criteria/nail_chain, trace 走外部 tasks/<id>.trace.jsonl; Service: CreateTask / SetItemSymbols / AppendTaskTrace / ListTaskTrace; box-mcp: 22 tools (17 base + 5 task); Box 不变式 #10: dumb storage, 智能归 agent. 本次要加 (R0.13.1 事务层): (1) Token session 系统: box_task_start → {task_id, token} (token = 'tsk_' + base64); 内存 sync.Map: token → {task_id, caller_id, created_at}; 进程重启 → 全失效 (in-flight task 全 abort). (2) Token-gated 写操作 hook (opt-in): 写时带 token → 自动 AppendTaskTrace; 不带 token → 现行行为 (不破 224 老测试). (3) Tx lifecycle 3 边界: BEGIN = box_task_start; COMMIT = box_task_finish(token, status=✓); ABORT = box_task_abort(token, reason); 注: box = dumb storage, 不真反向操作, 只标 ✗ + reason 入 trace. (4) 不变式 #11: Tokens are session state, not authorization. Writes without token still succeed (storage-only contract). 设计源 (dev-progress box): R0.10 主条目 ✓; R0.13.pass_criteria (已加 schema); M1 vehicle_model (顶层 4 task_start/finish/abort/get + interior 6 token-gated); M2 sym_via_wm (状态符号 ?/→/✓/✗/~/◯ 跟 wm C-Language 互通); M3 database_engine_forge 落地 (本次用它锻造 R0.13.1).",
+    "data_model_class": "other",
+    "workload_profile": {
+      "read_write_ratio": 5,
+      "cardinality_estimate": "small",
+      "access_pattern": "point",
+      "consistency_tier": "session",
+      "scale_target": "single_node"
+    },
+    "nfr_budget": {
+      "p50_latency_ms": 1,
+      "p99_latency_ms": 10,
+      "throughput_qps": 100,
+      "durability": "none"
+    },
+    "layered_views": {
+      "for_architect": "为 box-model dumb storage 加薄 session 事务层。核心是 token = session 句柄, 非 authorization, 不引入 ACID/锁/MVCC/replication. lifecycle 3 边界 (BEGIN/COMMIT/ABORT) 由 box_task_start/finish/abort 实现; ABORT 不真反向, 仅标 ✗ + trace. 进程重启 = 全 token 失效, 设计上 acceptable (in-flight task 自动 abort).",
+      "for_backend_eng": "实现要点: (a) sync.Map 存 token → {task_id, caller_id, created_at}, O(1) lookup, p50 < 1ms. (b) token 生成 'tsk_' + base64(random 16B). (c) 写操作 hook opt-in: 调用方传 token 则 service 自动 AppendTaskTrace; 不传 token 走旧路径 (224 老测试不破). (d) 进程退出/重启全清, 不持久化. (e) 不锁 item, 并发写允许 last-write-wins (storage 层既有契约).",
+      "for_wm_team": "本事务层不改 wm 知识图谱契约, 但 ABORT/COMMIT 边界以 status 符号 (✓/✗) + reason 写入 trace.jsonl, 与 sym_via_wm (M2) 的 ?/→/✓/✗/~/◯ 互通. trace 是 wm 侧可消费的事件流, token 仅 box 内部, 不外泄给 wm.",
+      "for_vector_rag": "vector RAG 实施者无直接交互. trace.jsonl 行级 JSON 可作为 retrievable event corpus (任务起止/中间步), 若 indexed 进 vector store 是后续 v0.2 决定, 本 R0.13.1 不涉及."
+    }
+  },
+  "escalations": [],
+  "escalation_note": "本次 ctx 由 user 预消化 (dev-progress 笔记), 各字段明确无歧义; escalations 空。data_model_class='other' 是用户显式选定 + 已附理由 (不是新引擎, 是加事务层), 非 Omega8 越界 → 不进 escalations。"
+}

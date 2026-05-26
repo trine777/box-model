@@ -2,3 +2,12 @@
 bin/
 coverage.out
 *.test
+# Stray binaries from `go build` without -o (cmd 同名).
+# `/box` matches the binary AND would match the `box/` source dir, so we
+# whitelist the source dirs back in below.
+/box
+/box-demo
+/import-nailforge
+/box-mcp
+!/box/
+

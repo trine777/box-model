@@ -1,0 +1,155 @@
+{
+  "state_of_art_map": {
+    "envelope": {
+      "producer": "claude_opus_4_7",
+      "produced_at": "2026-05-25T16:00:00Z",
+      "source_kind": "design_synthesis",
+      "audience": [
+        "database_engine_architect",
+        "backend_engineer_doing_storage_layer",
+        "nailforge_world_model_team",
+        "vector_rag_implementor"
+      ],
+      "confidence": 0.55
+    },
+    "comparable_engines": [
+      {
+        "engine_name": "PostgreSQL session / advisory locks",
+        "data_model_class": "other",
+        "storage_strategy": "heap + MVCC; sessions are in-memory backend state, not persisted across restart",
+        "consistency_model": "session-scoped state above ACID base; advisory_lock_session is process-bound and released on disconnect",
+        "notable_papers": [
+          {"title": "The Design of POSTGRES", "year": 1986, "venue": "ACM SIGMOD"}
+        ],
+        "tradeoff_notes": "session 即 backend process; 进程崩 → session 全失效; 与本项目 'process restart → tokens invalid' 完全同构",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.55
+      },
+      {
+        "engine_name": "Redis WATCH/MULTI/EXEC (optimistic session tx)",
+        "data_model_class": "other",
+        "storage_strategy": "in-memory KV; tx state per-connection",
+        "consistency_model": "optimistic check-and-set; tx aborts if watched key changed; no rollback of side effects since EXEC is atomic batch",
+        "notable_papers": [],
+        "tradeoff_notes": "tx 是 connection-scoped session; EXEC 失败仅放弃 batch, 不撤销已 issue 命令 (单 batch 原子); 与本项目 'abort 仅标 ✗ 不反向' 同构",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.55
+      },
+      {
+        "engine_name": "Saga pattern (Garcia-Molina & Salem 1987)",
+        "data_model_class": "other",
+        "storage_strategy": "n/a (architectural pattern, not engine)",
+        "consistency_model": "long-running tx as sequence of local tx + compensating actions; no global ACID; abort = run compensations",
+        "notable_papers": [
+          {"title": "Sagas", "year": 1987, "venue": "ACM SIGMOD"}
+        ],
+        "tradeoff_notes": "本项目是 saga 的退化形态: lifecycle 边界存在, 但 box=dumb storage 不写补偿动作, 只标 ✗ + reason. 是 'saga without compensations'.",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.5
+      },
+      {
+        "engine_name": "Erlang/OTP gen_server + ETS",
+        "data_model_class": "other",
+        "storage_strategy": "actor process holds state; ETS in-memory tables; supervisor restarts process on crash",
+        "consistency_model": "no tx; per-actor mailbox serialization; restart = state reset (let-it-crash)",
+        "notable_papers": [],
+        "tradeoff_notes": "actor model 的 session 与 process lifetime 绑定 · 进程重启 = 状态清零 · 与本项目 'token = session, restart wipes all' 哲学一致",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.5
+      },
+      {
+        "engine_name": "SQLite WAL + ATTACH / temp tables",
+        "data_model_class": "other",
+        "storage_strategy": "single-file + WAL; temp tables/session attaches are per-connection",
+        "consistency_model": "ACID per connection; connection close = session state gone; durable storage unaffected",
+        "notable_papers": [],
+        "tradeoff_notes": "session = sqlite3 connection · 本项目 token ≈ connection handle 思想",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.55
+      },
+      {
+        "engine_name": "MongoDB causal-consistent client sessions",
+        "data_model_class": "document",
+        "storage_strategy": "WiredTiger; client sessions track operation_time/cluster_time tokens",
+        "consistency_model": "session-scoped causal consistency; client session token is opaque handle; expiry on idle timeout",
+        "notable_papers": [],
+        "tradeoff_notes": "client session token 与本项目 token 在形态上极像 (opaque string handle, server side state); 但 Mongo session 还携带 read_concern, 本项目更轻",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.5
+      }
+    ],
+    "relevant_papers": [
+      {
+        "title": "Sagas (Garcia-Molina, Salem)",
+        "key_insight": "长 tx 拆为 local tx 序列 + 各自 compensating action; 用应用层补偿替代 ACID rollback",
+        "applicability": "本项目是 'sagas without compensations' 形态 · 借 lifecycle 概念 (BEGIN/COMMIT/ABORT) 但不实现反向 op",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.55
+      },
+      {
+        "title": "ARIES: A Transaction Recovery Method (Mohan et al.)",
+        "key_insight": "Write-Ahead-Logging + undo/redo + LSN 序列实现 crash recovery",
+        "applicability": "本项目刻意拒绝 ARIES: dumb storage + durability=none, recovery 策略 = 'restart wipes session' 而非 redo log. 列出仅为对照说明 '不采用'",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.5
+      },
+      {
+        "title": "Actor Model (Hewitt 1973) / Erlang 'Let it crash'",
+        "key_insight": "并发实体 = process + mailbox; 失败时 supervisor 重启, 状态丢失视为正常",
+        "applicability": "本项目 'process restart → tokens全失效, in-flight tasks auto-abort' 即此哲学的直接应用",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.6
+      },
+      {
+        "title": "Generalized Isolation Level Definitions (Adya, Liskov, O'Neil 2000)",
+        "key_insight": "用 history graph 形式化各 isolation level, 区分 anomaly",
+        "applicability": "本项目刻意只给 'session_token_scope' 这一非标准弱级别 · 列此 paper 作为 baseline 说明 '为何不映射到任何 standard level'",
+        "source_kind": "inference",
+        "do_not_cite": true,
+        "confidence": 0.5
+      }
+    ],
+    "design_tradeoff_summary": [
+      {
+        "axis": "B+tree vs LSM",
+        "criteria": "read latency vs write throughput",
+        "recommended_for_this_intent": "neither — 本项目不动 storage 层, box 已有 FileStore (journal-replay), 本 tx 层只在内存维护 token map, 不引入新索引结构"
+      },
+      {
+        "axis": "row vs column store",
+        "criteria": "OLTP point read vs OLAP scan",
+        "recommended_for_this_intent": "row-equivalent (box item-by-item) · workload 是 point access, OLAP scan 不在范围"
+      },
+      {
+        "axis": "强一致性 vs 高可用",
+        "criteria": "CAP 取舍",
+        "recommended_for_this_intent": "neither — single_node, 无 partition 概念; consistency_tier=session 即进程内可见性, 不涉及多节点 CAP"
+      },
+      {
+        "axis": "嵌入式 vs C/S",
+        "criteria": "deployment topology + latency",
+        "recommended_for_this_intent": "嵌入式 / in-process · box-mcp 是 single process, token 仅 in-memory sync.Map, 无网络 round trip 进入 tx 路径"
+      },
+      {
+        "axis": "(extra) hard rollback vs soft mark-fail",
+        "criteria": "abort 时是否真反向已写数据",
+        "recommended_for_this_intent": "soft mark-fail · box=dumb storage, ABORT 仅写 ✗ + reason 入 trace, 不撤回已 commit 的 storage 修改 (不变式 #10 + #11 联合约束)"
+      },
+      {
+        "axis": "(extra) session token vs authorization token",
+        "criteria": "token 是状态句柄还是权限凭证",
+        "recommended_for_this_intent": "session token only · 不变式 #11: 'tokens are session state, not authorization'; 无 token 的写仍然成功 (保持 storage-only contract + 旧 224 测试不破)"
+      }
+    ]
+  },
+  "bridge_judgment_note": "L→K bridge 已 self-judge: 6 个 comparable engine 全部 source_kind=inference + do_not_cite=true · 模型未直接读取原文 · confidence ≤ 0.6. 4 个 standard tradeoff_axis 全列 (即使本项目 'neither' 也写明理由), 额外加 2 个项目相关 axis (soft mark-fail / session vs authorization) 不删原 4 个 (Omega2 monotonic)."
+}

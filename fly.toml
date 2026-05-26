@@ -1,0 +1,50 @@
+# fly.toml — box-model remote MCP server
+#
+# Deploys cmd/box-mcp behind Streamable-HTTP /mcp + Bearer auth.
+# Other agents connect to:
+#   https://box-mcp-trine.fly.dev/mcp
+#   Authorization: Bearer $BOX_API_TOKEN
+#
+# Health probe:  GET /healthz (unauthenticated, returns "ok")
+
+app            = "box-mcp-trine"
+primary_region = "nrt"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  BOX_HOME   = "/data"
+  BOX_CALLER = "trine"
+
+# Persistent KM data. /data is mounted from the box_data Volume.
+[mounts]
+  source      = "box_data"
+  destination = "/data"
+
+# Streamable-HTTP MCP service.
+[http_service]
+  internal_port       = 8080
+  force_https         = true
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes           = ["app"]
+
+  [http_service.concurrency]
+    type       = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+# Fly health check hits /healthz (outside the Bearer middleware).
+[[http_service.checks]]
+  interval = "30s"
+  timeout  = "5s"
+  grace_period = "10s"
+  method   = "GET"
+  path     = "/healthz"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus     = 1
+  memory   = "256mb"

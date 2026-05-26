@@ -1,0 +1,59 @@
+{
+  "storage_spec": {
+    "envelope": {
+      "producer": "claude_opus_4_7",
+      "produced_at": "2026-05-25T16:00:00Z",
+      "source_kind": "design_synthesis",
+      "audience": [
+        "database_engine_architect",
+        "backend_engineer_doing_storage_layer",
+        "nailforge_world_model_team",
+        "vector_rag_implementor"
+      ],
+      "confidence": 0.5
+    },
+    "degeneration_note": "本项目 (box_transaction_layer) 不动 box-model 既有 storage. FileStore (journal-replay 持久化) 与 tasks/<id>.trace.jsonl 均沿用. 本层只补充描述 trace.jsonl 的事务相关写入语义 (COMMIT/ABORT 时 append 一行) 与 in-memory TokenSession map 的非持久化语义. 大多数 canonical fields 退化为 'inherit from box'.",
+    "page_format": {
+      "page_size_bytes": 0,
+      "header_layout": "n/a — box FileStore 是 journal (append-only) + replay 模式, 无 fixed-size page",
+      "record_layout": "inherit: box journal 每行一个 op record; tasks/<id>.trace.jsonl 每行一个 JSON event (既有, 本层不改 format)"
+    },
+    "data_organization": "log_structured",
+    "data_organization_decision": {
+      "confidence": 0.6,
+      "rationale": "沿用 box 既有 journal-replay (append-only log) · 本 tx 层不引入新存储结构 · trace.jsonl 同样是 append-only log",
+      "alternatives_considered": [
+        {"kind": "heap", "rejected_reason": "box 已选 log-structured, 不重设计"},
+        {"kind": "sstable", "rejected_reason": "本项目 cardinality_estimate=small, 无 compaction 需求"}
+      ]
+    },
+    "write_path": {
+      "wal_strategy": "none",
+      "checkpoint_strategy": "inherit from box FileStore (journal snapshot 策略沿用既有)",
+      "compaction_strategy": "inherit from box FileStore (本层不动 compaction)",
+      "cancel_rollback_path": "本层显式无 rollback: 不变式 #10 (dumb storage) + #11 (token = session). ABORT 不撤销已写入 box 的 storage 修改, 仅在 tasks/<task_id>.trace.jsonl append 一行 {status:✗, reason, at:ts}. 调用方 (agent) 若需逻辑撤销 → 写补偿动作 (saga without compensations 哲学). 风险显式标注: 已写入 Item/Symbol 在 ABORT 后仍可见, 这是设计 acceptable."
+    },
+    "read_path": {
+      "buffer_pool_strategy": "n/a — box-model 是 in-memory cache + on-disk journal, 全数据集驻内存 (cardinality small, single node), 不需 LRU buffer pool",
+      "cache_eviction": "lru",
+      "cache_eviction_note": "形式上填 lru 满足 schema, 实际本层无独立 cache; sync.Map 容量由 active task 数 (~10) 自然约束, 不需 eviction. Token 仅在 box_task_finish/abort 时 explicit delete."
+    },
+    "durability": {
+      "fsync_policy": "none",
+      "recovery_protocol": "Process restart wipes all TokenSession (in-memory only). In-flight tasks (token 持有者但未 finish/abort) 在重启后视为 implicitly aborted — 但 box storage 中其 Item 仍存在 (因为 box journal 已持久化它的 create/update). 这是 by-design: token = session 句柄, 不是 transaction lock. 重启后调用方若想继续该 task, 需 box_task_start 一个新 token 或操作既有 task (无 token 路径仍工作)."
+    },
+    "unsupported_features": [
+      "Token persistence across restart — 显式不支持 (durability=none, by design)",
+      "Page-level undo log — 不支持; wal_strategy=none",
+      "Cross-process / distributed write — 不支持; single_node",
+      "Partial write tearing protection — 不引入 (inherit box FileStore guarantees, 本层无新写路径)",
+      "Online VACUUM / GC of stale tokens — v0.1 不做 (token 由 finish/abort explicit delete; orphan token 仅在崩溃-未-finish 场景, 重启自然清零)"
+    ],
+    "trace_jsonl_addendum": {
+      "note": "事务层在 trace.jsonl 既有 schema 上 append 两类新 event:",
+      "commit_event": "{op:'task_finish', token_prefix:'tsk_...', status:'✓', at:<ts>, caller_id, summary?}",
+      "abort_event":  "{op:'task_abort',  token_prefix:'tsk_...', status:'✗', at:<ts>, caller_id, reason}",
+      "write_event_via_token": "若开启 token-gated write hook, 每个 token 携带的 write 自动 append 一行 {op:<service_op>, token_prefix, at, payload_summary}"
+    }
+  }
+}

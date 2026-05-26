@@ -1,0 +1,12 @@
+.git
+.gitignore
+*.md
+docs/
+ROADMAP.md
+**/*_test.go
+bin/
+.box/
+.fly/
+fly.toml
+Dockerfile
+.dockerignore

@@ -1,0 +1,134 @@
+{
+  "consistency_spec": {
+    "envelope": {
+      "producer": "claude_opus_4_7",
+      "produced_at": "2026-05-25T16:00:00Z",
+      "source_kind": "design_synthesis",
+      "audience": [
+        "database_engine_architect",
+        "backend_engineer_doing_storage_layer",
+        "nailforge_world_model_team",
+        "vector_rag_implementor"
+      ],
+      "confidence": 0.7
+    },
+    "core_design_note": "本项目核心层. token session + 3 边界 (BEGIN/COMMIT/ABORT) + crash_recovery 由 process restart 隐式触发, 这些是 a6 真正的新设计.",
+    "transaction_model": {
+      "kind": "session",
+      "kind_note": "非标 enum 值. organ schema 列出 acid|base|serializable_snapshot|read_committed|none 五选项, 'session' 不在内. 本项目显式选择新增 'session' 类目 (软事务, 仅 in-memory 句柄), 在 unsupported_isolation_levels 与 omissions 中显式说明偏离 organ schema 的理由 (Omega8).",
+      "isolation_levels_supported": ["session_token_scope"],
+      "isolation_level_definition": {
+        "name": "session_token_scope",
+        "semantics": "在持有同一 token 的写操作序列内, 调用方可观测到自己写入的最新结果 (read-your-writes, 因为 box storage 即时可见); 无 atomicity 跨多写; 无 isolation vs 其他并发 token (last-writer-wins on Item); 进程崩溃 → token 失效, in-flight 序列被视为隐式 abort. 不映射到 Adya/Liskov 标准级别.",
+        "anomalies_permitted": [
+          "lost_update (并发 token 写同一 Item, 后写覆盖)",
+          "non_repeatable_read (其他 token 写入立即可见)",
+          "dirty_read (其实无 'dirty' 概念, 因无 commit semantics; 写即可见)",
+          "phantom (sym/view 查询期间他方写入立即可见)"
+        ]
+      },
+      "mvcc_or_lock": "none",
+      "mvcc_or_lock_note": "token 不锁 item, 不创建 version. 是显式选择: 不变式 #10 (dumb storage) + #11 (token = session, not authorization) 联合要求.",
+      "decision": {
+        "confidence": 0.85,
+        "rationale": "用户 ctx 明确要求: session-only soft tx, no rollback, no lock. 直接由不变式 #10/#11 + R0.13.1 spec 推导, 无需替代方案. 'session' kind 是对 organ schema enum 的诚实扩展 (Omega8 路径处理).",
+        "alternatives_considered": [
+          {"kind": "acid", "rejected_reason": "需要真 rollback + 锁/MVCC, 违反不变式 #10 (dumb storage), 也超出 R0.13.1 范围"},
+          {"kind": "none", "rejected_reason": "'none' 通常指无 tx 概念; 本层有 lifecycle 3 边界, 严格说 'none' 描述不准, 'session' 更诚实"},
+          {"kind": "base (eventually consistent)", "rejected_reason": "BASE 概念用于分布式 replicated 场景, 本层 single_node 不适用"}
+        ]
+      }
+    },
+    "replication": {
+      "kind": "none",
+      "read_quorum": 0,
+      "write_quorum": 0,
+      "cascade_notify_channels": [],
+      "cascade_notify_note": "replication=none 时 Pi5 cascade_notify_channels 不强制 ≥ 2 (无下游可通知). 但保留字段位以满足 schema, 显式空数组 + note 表态.",
+      "decision": {
+        "confidence": 0.9,
+        "rationale": "scale_target=single_node, 显式无 replication. 与 box-model 既有部署一致 (一人公司, single process).",
+        "alternatives_considered": [
+          {"kind": "async", "rejected_reason": "超出本项目范围, 进程崩 = 全状态丢失是 acceptable feature"},
+          {"kind": "raft", "rejected_reason": "无多节点, 不需 consensus"}
+        ]
+      }
+    },
+    "consensus_protocol": {
+      "kind": "n_a",
+      "leader_election": "n/a — single node, 无 leader 概念",
+      "decision": {
+        "confidence": 0.95,
+        "rationale": "single_node + replication=none → consensus 不适用",
+        "alternatives_considered": [
+          {"kind": "raft", "rejected_reason": "无多节点"}
+        ],
+        "cite_or_do_not_cite": {
+          "do_not_cite": true,
+          "note": "未真读 Raft/Paxos paper, 本层亦无需引用"
+        }
+      }
+    },
+    "failure_recovery": {
+      "crash_recovery": "process restart → all in-memory TokenSession invalidated → all in-flight tasks (token-holders that have not called box_task_finish/abort) auto-aborted implicitly. 'Auto-abort' 仅指 token 不再可用; 不向 trace.jsonl 写 abort event (因为没有任何活进程来写). 已 commit 到 box FileStore 的 Item/Symbol/View 修改保持完整 (FileStore journal-replay 既有 durability). 重启后 caller 若关心某 task 状态, 通过 box_task_get 查 trace.jsonl 末行: 若末行非 finish/abort, 视为 'orphaned by crash' (caller layer decision).",
+      "crash_recovery_observability_gap": "存在已知盲区: crash-orphan task 在 trace.jsonl 上不会自动留下 'aborted by crash' 标记. v0.2 可加 startup hook: 扫描 trace.jsonl 末行未闭合的 task, append 一行 {status:'?', reason:'orphan_by_crash', at:<startup_ts>}. v0.1 不做.",
+      "split_brain_strategy": "n_a — single node 无 split brain. 即便重启窗口期有重叠 (旧进程未退新进程已启), token 不跨进程, 旧进程 token 在新进程查不到, 自然失效."
+    },
+    "rollback_paths": {
+      "transaction_abort": "box_task_abort(token, reason) 流程: (1) sync.Map.LoadAndDelete(token); (2) 若 token 不存在 → return ErrUnknownToken (idempotent: 调用方可重试 finish/abort 两次, 第二次得 ErrUnknownToken, 视为 noop); (3) 若存在 → AppendTaskTrace(task_id, {status:'✗', reason, at:ts, caller_id}); (4) SetItemSymbols(task_id, ['✗']) (Item symbol 标 ✗); (5) return ok. 关键: 不撤销该 token 期间写入 box 的任何其他 Item/Symbol 修改 — 不变式 #10 + #11. 调用方需补偿请自行写补偿动作 (saga without compensations 哲学).",
+      "replication_failure": "n_a — replication=none",
+      "consensus_leader_change": "n_a — consensus=n_a"
+    },
+    "tx_lifecycle_boundaries": {
+      "BEGIN": {
+        "tool": "box_task_start",
+        "input": "{task_id?, source, goal, pass_criteria, nail_chain, caller_id}",
+        "behavior": "(1) 若无 task_id → CreateTask 生成 Item(kind=task); 若提供 task_id → 校验存在; (2) 生成 token = 'tsk_' + base64(random_16_bytes); (3) sync.Map.Store(token, {task_id, caller_id, created_at:now}); (4) AppendTaskTrace(task_id, {status:'→', op:'task_start', token_prefix:'tsk_xxx...', at, caller_id}); (5) SetItemSymbols(task_id, ['→']); (6) return {task_id, token}.",
+        "rules": "同一 task_id 可被多次 box_task_start; 旧 token 不主动失效 (允许并发 token, 后果是 last-writer-wins on trace顺序). v0.2 可加 'reject_if_active_token' 选项."
+      },
+      "COMMIT": {
+        "tool": "box_task_finish",
+        "input": "{token, status:'✓', summary?}",
+        "behavior": "(1) sync.Map.LoadAndDelete(token); (2) 不存在 → ErrUnknownToken; (3) 存在 → AppendTaskTrace(task_id, {status:'✓', op:'task_finish', at, caller_id, summary?}); (4) SetItemSymbols(task_id, ['✓']); (5) return ok. 'COMMIT' 不真原子提交多 op (box 是 dumb storage, 各 op 写入时已可见); finish 仅标完结."
+      },
+      "ABORT": {
+        "tool": "box_task_abort",
+        "input": "{token, reason}",
+        "behavior": "见 rollback_paths.transaction_abort. 关键: 不反向, 仅标 ✗ + reason 入 trace + Item symbol."
+      },
+      "GET": {
+        "tool": "box_task_get",
+        "input": "{task_id} OR {token}",
+        "behavior": "返回 task 当前 symbol + trace 尾行 + (若有 token) token 是否仍 active. 此为 read-only convenience, 不属 lifecycle 边界."
+      },
+      "token_gated_writes": {
+        "scope": "M1 interior 6 tool (e.g. box_task_set_symbols_with_token, box_task_create_item_with_token, ...) — opt-in",
+        "behavior": "调用时携带 token → service 自动 AppendTaskTrace(task_id, {op:<write_op>, token_prefix, at, args_summary}) — 形成可追溯写历史. 不带 token 走旧路径 (224 老测试保留, 不变式 #11)."
+      }
+    },
+    "unsupported_isolation_levels": [
+      {"level": "read_uncommitted", "reason": "本层无 commit 概念; 不映射"},
+      {"level": "read_committed", "reason": "无 commit edge; 写即可见, 既比 read_committed 强 (read-your-writes) 又比 RC 弱 (无 snapshot)"},
+      {"level": "repeatable_read", "reason": "无 snapshot, 不能保证同 token 内重复读结果一致 (他方写入立即可见)"},
+      {"level": "serializable", "reason": "无 lock / SSI 机制, 不可达"},
+      {"level": "snapshot_isolation", "reason": "无 MVCC, 不可达"},
+      {"level": "causal_consistency", "reason": "无 vector clock / version tracking, 不可达"},
+      {"level": "linearizability", "reason": "单线程 sync.Map 操作可视为 token map 自身 linearizable, 但跨 token map + item store 的复合操作不 linearizable; 显式不主张"}
+    ],
+    "design_invariants_enforced": [
+      "#10 dumb storage — 本层不引入 storage-side rollback, 不锁 item",
+      "#11 tokens are session state, not authorization — 无 token 写仍成功 (保旧 224 测试)",
+      "#11 corollary — token 不持久化, restart wipes all",
+      "tool 命名稳定 (box_task_start/finish/abort/get) 不破 M1 接口契约"
+    ],
+    "omissions_v01_explicit": [
+      "不做反向操作 (no rollback of storage writes); abort 仅标 ✗ + reason",
+      "不做跨进程 token (token 不持久化, 无 token store)",
+      "不做严格 ACID; 仅 session 软事务",
+      "不做 token idle TTL / expiry (仅 process lifetime); v0.2 可加",
+      "不做 crash-orphan auto-mark (重启不扫 trace 标 orphan), v0.2 可加",
+      "不做并发 token 互斥 (同 task_id 允许多 token 并存; last-writer-wins on trace order)",
+      "不做 token revocation API (除 finish/abort 外无 admin 撤销路径)"
+    ]
+  }
+}

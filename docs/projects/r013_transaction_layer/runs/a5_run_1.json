@@ -1,0 +1,93 @@
+{
+  "query_engine_spec": {
+    "envelope": {
+      "producer": "claude_opus_4_7",
+      "produced_at": "2026-05-25T16:00:00Z",
+      "source_kind": "design_synthesis",
+      "audience": [
+        "database_engine_architect",
+        "backend_engineer_doing_storage_layer",
+        "nailforge_world_model_team",
+        "vector_rag_implementor"
+      ],
+      "confidence": 0.45
+    },
+    "degeneration_note": "本项目 (box_transaction_layer) 不引入查询语言或查询规划器. box-model 既有访问通路是 Service Go API (CreateTask / SetItemSymbols / AppendTaskTrace / ListTaskTrace / ...) + box-mcp 22 tools. 本层只新增 4 顶层 + 6 token-gated MCP tool (M1 vehicle_model), 不构成 'query engine'. a5 大部退化, 此处只描述 MCP tool 入口作为唯一 'query surface'.",
+    "query_language": {
+      "type": "api_only",
+      "grammar_outline": "n/a — 无 query language. 入口为 MCP tool JSON RPC: box_task_start, box_task_finish, box_task_abort, box_task_get (顶层 4) + 6 token-gated 写 tool 别名 (M1 设计). 输入是 structured JSON args, 输出是 structured JSON result. 无 parser/planner/optimizer 概念.",
+      "decision": {
+        "confidence": 0.7,
+        "rationale": "沿用 box-mcp 既有 tool 调用约定 · 不引入 DSL · 与 R0.10 既有 5 task tool 同型",
+        "alternatives_considered": [
+          {"kind": "custom_dsl", "rejected_reason": "无场景需求, 22 tool 已覆盖, 增 DSL 是过度设计"},
+          {"kind": "sql", "rejected_reason": "box 是 KM dumb storage, 不需 relational query"}
+        ]
+      }
+    },
+    "parser": {
+      "kind": "library",
+      "library_note": "MCP server 框架 (既有, mcp-go style) 完成 JSON arg 解析 · 本层不写 parser",
+      "decision": {
+        "confidence": 0.7,
+        "rationale": "沿用 MCP 标准 JSON RPC 解析路径 · 无自定义 parser",
+        "alternatives_considered": [
+          {"kind": "handwritten", "rejected_reason": "无 query language 需要 parse"},
+          {"kind": "generated", "rejected_reason": "同上"}
+        ]
+      }
+    },
+    "planner": {
+      "cost_model_strategy": "n/a — 无 query planning. 每个 MCP tool 直接调用对应 Service method, 固定执行路径.",
+      "join_algorithms": [
+        "nested_loop (n/a, 列出仅满足 schema 要求 ≥2 项; 实际本层无 join)",
+        "hash_join (n/a, 同上)"
+      ],
+      "index_selection_strategy": "n/a — token map 查询固定走 sync.Map (单 hash index, 见 a3); 其余 Item/Symbol lookup 沿用 box 既有 in-memory map",
+      "decision": {
+        "confidence": 0.6,
+        "rationale": "无 planning 需求 · token 查询是单 lookup, 写操作是单 append; 不存在 join / multi-stage plan",
+        "alternatives_considered": [
+          {"kind": "rule_based planner", "rejected_reason": "无 query expression 可重写"}
+        ]
+      }
+    },
+    "optimizer": {
+      "kind": "rule_based",
+      "optimization_passes": [
+        "noop (本层无表达式可优化; 列名仅满足 schema 要求 ≥3 项)",
+        "token_lookup_inline (concept: token 校验在 service handler 入口完成, 不走多层间接)",
+        "trace_append_async_off (concept: v0.1 trace 写同步, 不优化为 async — 一致性优先)"
+      ],
+      "decision": {
+        "confidence": 0.5,
+        "rationale": "本层无传统 optimizer; 列出的 'pass' 实为 code 路径约定, 非真 transformation rule",
+        "alternatives_considered": [
+          {"kind": "cost_based", "rejected_reason": "无统计 / 无替换候选, CBO 无意义"},
+          {"kind": "hybrid", "rejected_reason": "同上"}
+        ]
+      }
+    },
+    "executor": {
+      "kind": "tuple_at_a_time",
+      "parallelism_strategy": "per-request goroutine (MCP server 既有); 单 request 内顺序执行 token 校验 → service 调用 → trace append. token map 操作并发安全 (sync.Map).",
+      "decision": {
+        "confidence": 0.7,
+        "rationale": "MCP request-response 即 tuple-at-a-time; 无批处理需求",
+        "alternatives_considered": [
+          {"kind": "vectorized", "rejected_reason": "无批查询场景"},
+          {"kind": "push_based", "rejected_reason": "无 streaming, 同步 RPC 模型"}
+        ]
+      }
+    },
+    "unsupported_query_features": [
+      "Recursive CTE / WITH RECURSIVE — n/a (无查询语言)",
+      "Cross-shard join — n/a (single_node)",
+      "Window functions — n/a",
+      "Stored procedures / UDF — n/a",
+      "Vector ANN — 不在本项目范围 (vector_rag 是另一条线)",
+      "Bulk batch tool — v0.1 不支持 (每个 MCP call 单 task; 多 task 由调用方循环, 不在事务层封装)",
+      "Cross-token query (列出某 caller_id 所有 active token) — v0.1 不暴露 admin 查询接口, v0.2 视需求加"
+    ]
+  }
+}

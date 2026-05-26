@@ -47,3 +47,15 @@ CREATE TABLE box_consumes (
 );
 
 CREATE INDEX idx_box_consumes_item ON box_consumes (item_id);
+
+-- R0.2: Item revision chain. Stored as ALTER TABLE deltas to make the
+-- migration story explicit; the canonical schema is the base table above
+-- plus these additive changes.
+ALTER TABLE box_items ADD COLUMN revision_of    TEXT REFERENCES box_items(item_id);
+ALTER TABLE box_items ADD COLUMN revision       INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE box_items ADD COLUMN is_latest      BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE box_items ADD COLUMN superseded_at  TIMESTAMPTZ;
+
+-- Default Browse path only sees IsLatest rows; this partial index keeps the
+-- hot path cheap regardless of how deep the version chain grows.
+CREATE INDEX idx_box_items_latest ON box_items (box_id, stored_at DESC) WHERE is_latest;

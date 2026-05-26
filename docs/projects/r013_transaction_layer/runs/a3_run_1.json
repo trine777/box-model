@@ -1,0 +1,84 @@
+{
+  "data_model_spec": {
+    "envelope": {
+      "producer": "claude_opus_4_7",
+      "produced_at": "2026-05-25T16:00:00Z",
+      "source_kind": "design_synthesis",
+      "audience": [
+        "database_engine_architect",
+        "backend_engineer_doing_storage_layer",
+        "nailforge_world_model_team",
+        "vector_rag_implementor"
+      ],
+      "confidence": 0.5
+    },
+    "degeneration_note": "本项目 (box_transaction_layer) 不造新 engine, 沿用 box-model 既有 data model (Item / Symbol / View / Task=Item(kind=task)). a3 不重设计 data model, 只增量描述事务层新引入的两个 in-memory entity (TokenSession, TaskTraceEntry already exists), 并标 omission.",
+    "primitive_types": [
+      "string (existing in box: ItemID, SymbolID, ViewID)",
+      "int64 (existing in box: timestamps)",
+      "bytes (new: random 16B → base64 → 'tsk_' + base64 = TokenString)"
+    ],
+    "composite_types": [
+      {
+        "name": "TokenSession",
+        "definition": "struct { token: string (key); task_id: ItemID; caller_id: string; created_at: int64 }",
+        "rationale": "事务层唯一新增 in-memory entity · 不持久化 · 进程内 sync.Map 存活"
+      },
+      {
+        "name": "Item (existing, unchanged)",
+        "definition": "box 既有, 含 kind=task 时 content schema 已定 (source/goal/pass_criteria/nail_chain)",
+        "rationale": "沿用, 不动"
+      },
+      {
+        "name": "TaskTraceEntry (existing, unchanged)",
+        "definition": "已存在于 tasks/<id>.trace.jsonl, 行级 JSON, 字段 status/reason/at/op 等",
+        "rationale": "沿用 · 本层只新增 ABORT 时写一行 status=✗ + reason; COMMIT 时写 status=✓"
+      }
+    ],
+    "relationships": [
+      {
+        "relation_kind": "one_to_one",
+        "cardinality": "TokenSession.task_id → Item(kind=task) 1:1 (同一 task 同时只允许 1 个 active token; 重复 box_task_start → 旧 token 失效或拒绝, 见 a6 决定)",
+        "integrity_constraints": [
+          "TokenSession.task_id MUST reference existing Item with kind=task",
+          "TokenSession lifetime ≤ process lifetime",
+          "no FK persistence (TokenSession is in-memory; on restart referent Item still exists but token is gone)"
+        ]
+      },
+      {
+        "relation_kind": "one_to_many",
+        "cardinality": "Item(kind=task) → TaskTraceEntry · 1:N (一个 task 多行 trace)",
+        "integrity_constraints": [
+          "trace 仅 append (既有), 本层 COMMIT/ABORT 各 append 一行"
+        ]
+      }
+    ],
+    "indexes": [
+      {
+        "index_name": "token_session_map",
+        "index_kind": "hash",
+        "covers_columns": ["token"],
+        "access_pattern_served": "point",
+        "confidence": 0.7,
+        "rationale": "Go sync.Map 即 hash 表 · O(1) lookup · 满足 p50<1ms NFR; 内存数据无需 btree (cardinality_estimate=small, ~10 并发 task)",
+        "alternatives_considered": [
+          {"kind": "btree", "rejected_reason": "btree 适合 range/ordered scan · token 仅 point lookup · 不需排序"},
+          {"kind": "lock-free hash (e.g. cmap)", "rejected_reason": "Go 1.9+ sync.Map 已 read-mostly 优化, 自实现 cmap 性价比低"}
+        ]
+      }
+    ],
+    "type_system_rules": [
+      "TokenString 必以 'tsk_' 前缀 (运行时校验, 误传 task_id 直接 reject)",
+      "TokenSession 不可序列化 (json tag '-'), 防意外持久化 · 强化 'session state only' 不变式 #11",
+      "Item/Symbol/View type system 沿用 box 既有, 本层不引入 cast / 新 primitive"
+    ],
+    "schema_evolution_strategy": "本层无 persistent schema (TokenSession 全内存). 字段增减只需改 Go struct + recompile, 无需 migration. 既有 box Item/Symbol schema 演化沿用 box 自身策略 (journal-replay forward-compat).",
+    "unsupported_constructs": [
+      "Token persistence — 显式不支持; restart wipes all, 这是 feature 非 bug (不变式: durability=none)",
+      "Cross-process token sharing — 不支持; token 仅本进程 sync.Map 可见",
+      "Token-as-authorization — 不支持; 不变式 #11 明禁; 无 token 写仍成功",
+      "User-defined token type — 不支持; token 唯一来源是 box_task_start 服务端生成",
+      "Token TTL / idle expiry — v0.1 不实现; 仅 process lifetime 决定 token 寿命 (v0.2 可选加 idle timeout)"
+    ]
+  }
+}

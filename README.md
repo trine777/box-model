@@ -76,9 +76,12 @@ examples/
 2. Box rows are rebuildable from source tables and outbox history.
 3. Writes are idempotent by `idem_key`.
 4. Labels are namespaced; reserved namespaces start with `__`.
-5. Physical content is addressed through `storage_uri`, not owned by Box.
+5. Items may carry inline `content` as a self-contained copy; `storage_uri` remains required as the upstream provenance pointer (the SoR for regeneration). When `content` is present, Box owns a *copy* of it, but regeneration-authoritative reads still go through `storage_uri`.
 6. Read paths must have a degraded fallback when Box is unavailable.
 7. Semantic search is optional and external to Box.
+10. **Box is dumb storage. Intelligence belongs to the agent.** Box validates schemas (e.g. PassCriteria.Kind enum, Goal length, Symbol validity) but NEVER interprets them. Box does not run `pass_criteria.query` to decide if a task is complete — the agent must do that and set the task status explicitly via `SetItemSymbols`. Box does not enforce `nail_chain` order or invoke nails — the agent loads nail YAML and calls LLMs itself.
+11. **Tokens (程符) are session state, not authorization. Writes without a token still succeed (storage-only contract). Process restart invalidates all tokens.** Program-track sessions (`StartYiCheng` / `FinishYiCheng` / `AbortYiCheng`) live only in process memory (`sync.Map`). A token identifies one execution path so opt-in writes can auto-attach trace events; it does NOT gate access. Box never persists tokens — by design — so a restart wipes every live session while leaving the on-disk task trace intact.
+12. **Box is "符径(Symbol Path)" — not a database.** See `docs/semantic_redesign.md` for the lexicon SoR. The program-track layer uses path-ledger semantics: every event (start / write / finish / abort) appends to a per-task `trace.jsonl`, and the visible "status" (✓ / ✗ / ? / → / ~ / ◯) is a cursor over that ledger that any later event may flip. There is no terminal state; `FinishYiCheng` is just one more event that paints a ✓ cursor.
 
 ## License
 
