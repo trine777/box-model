@@ -1612,17 +1612,23 @@ func (rc *rootContext) cmdTaskCreate() int {
 		fmt.Fprintln(rc.stderr, "Error: cannot resolve caller (set --caller or BOX_CALLER)")
 		return 2
 	}
+	pcStruct := box.PassCriteria{
+		Kind:   *passKind,
+		Query:  query,
+		Arg:    *passArg,
+		Reason: *passReas,
+	}
+	pcRaw, err := json.Marshal(pcStruct)
+	if err != nil {
+		fmt.Fprintf(rc.stderr, "Error: encode pass_criteria: %s\n", err.Error())
+		return 2
+	}
 	item, err := svc.CreateTask(ctx, callerID, b.ID, box.CreateTaskRequest{
-		Intent: *intent,
-		Source: source,
-		Goal:   goal,
-		PassCriteria: box.PassCriteria{
-			Kind:   *passKind,
-			Query:  query,
-			Arg:    *passArg,
-			Reason: *passReas,
-		},
-		NailChain: nails.values,
+		Intent:       *intent,
+		Source:       source,
+		Goal:         goal,
+		PassCriteria: pcRaw,
+		NailChain:    nails.values,
 	})
 	if err != nil {
 		return mapErr(err, rc.stderr)
@@ -1774,11 +1780,11 @@ func (rc *rootContext) cmdTaskTrace() int {
 		fmt.Fprintln(rc.stderr, "Error: cannot resolve caller (set --caller or BOX_CALLER)")
 		return 2
 	}
-	if err := svc.AppendTaskTrace(ctx, callerID, taskID, step); err != nil {
+	if err := svc.AppendEvent(ctx, callerID, taskID, step); err != nil {
 		return mapErr(err, rc.stderr)
 	}
 	// Print the final list — the test surface and CLI ergonomics agree.
-	trace, err := svc.ListTaskTrace(ctx, callerID, taskID)
+	trace, err := svc.ListEvents(ctx, callerID, taskID)
 	if err != nil {
 		return mapErr(err, rc.stderr)
 	}
@@ -1812,7 +1818,7 @@ func (rc *rootContext) cmdTaskListTrace() int {
 		return code
 	}
 	ctx := context.Background()
-	trace, err := svc.ListTaskTrace(ctx, rc.resolveCallerExplicit(*caller), taskID)
+	trace, err := svc.ListEvents(ctx, rc.resolveCallerExplicit(*caller), taskID)
 	if err != nil {
 		return mapErr(err, rc.stderr)
 	}

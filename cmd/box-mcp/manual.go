@@ -41,7 +41,7 @@ joins, no transactions, no cursors, no roles**. There is:
 | ` + "`JOIN`" + ` | ` + "`box_neighbors`" + ` (hop-bounded relation BFS) | Relations are explicit ` + "`SymRelation`" + ` symbols, not foreign keys. |
 | ` + "`BEGIN … COMMIT`" + ` | ` + "`box_task_start`" + ` → ` + "`box_task_finish`" + ` | This is a **path ledger**, not a transaction. Finish does NOT freeze. No rollback. |
 | ` + "`ROLLBACK`" + ` | ` + "`box_task_abort`" + ` (appends a ✗ event) | No state reversion. The ✗ event becomes part of the history. |
-| ` + "`UPDATE`" + ` | ` + "`box_replace_item`" + ` (new revision) or ` + "`box_set_task_status`" + ` (overwrite 觉痕) | Replace opens a new revision; the old one is kept. Status flip mutates in place. |
+| ` + "`UPDATE`" + ` | ` + "`box_replace_item`" + ` (new revision) or ` + "`box_set_item_symbols`" + ` (overwrite 觉痕) | Replace opens a new revision; the old one is kept. Status flip mutates in place. |
 | Primary key | ` + "`item_id`" + ` (server-issued) + ` + "`idem_key`" + ` (caller-issued) | Idempotency at the protocol level, no upsert. |
 | Schema migration | None. ` + "`symbols`" + ` are open-set; ` + "`labels`" + ` are free-form. | Drop in new symbol kinds without DDL. |
 | ACL / GRANT | **There is none.** Bearer token = full access to the tenant. | Single-tenant by design (see capability matrix below). |
@@ -58,7 +58,7 @@ joins, no transactions, no cursors, no roles**. There is:
 3. **"I'll batch insert."** — There is no bulk endpoint yet (R0.14
    backlog). Today: loop ` + "`box_store`" + ` per item.
 4. **"The task is done, so it's locked."** — No. 合程 is an append, not a
-   freeze. ` + "`box_set_task_status`" + ` can flip ✓ back to → days
+   freeze. ` + "`box_set_item_symbols`" + ` can flip ✓ back to → days
    later. This is invariant #12 and it is intentional.
 5. **"Token is who I am."** — Token is just a session handle for one
    in-flight 程辙. It is NOT identity. Process restart wipes all tokens.
@@ -73,10 +73,11 @@ joins, no transactions, no cursors, no roles**. There is:
    ` + "`box_neighbors`" + `, and status flips. **This is the primary
    lookup mechanism, not labels.**
 4. **Task** = an item with kind=task carrying intent/goal/pass_criteria/
-   nail_chain. Created with ` + "`box_create_task`" + `.
+   nail_chain. Created with ` + "`box_task_start`" + ` (which makes the
+   task item and opens a 程辙 session in one call).
 5. **程辙 / YiCheng** = a session-scoped task lifecycle. Open with
    ` + "`box_task_start`" + ` (returns a token), append events with
-   ` + "`box_append_task_trace`" + `, close with ` + "`box_task_finish`" + `
+   ` + "`box_append_event`" + `, close with ` + "`box_task_finish`" + `
    or ` + "`box_task_abort`" + `. **Path ledger, not a transaction.** 合程
    (finish) is one more append; it does NOT freeze the task.
 
@@ -105,7 +106,7 @@ sheet:
 - **scope / topic / domain**: free-form (` + "`[A-Za-z0-9_-]+`" + `,
   ` + "`nf:<ns>`" + ` for domain)
 
-## The 28 tools
+## The 26 tools
 
 ### Box / Item CRUD (17)
 - ` + "`box_create_box`" + ` — create a box (key, owner_type, owner_id)
@@ -127,11 +128,15 @@ sheet:
 - ` + "`box_neighbors`" + ` — hop-bounded relation subgraph
 
 ### Task surface (R0.10) (5)
-- ` + "`box_create_task`" + ` — task item with pass_criteria
-- ` + "`box_set_task_status`" + ` — flip 觉痕 in-place
-- ` + "`box_append_task_trace`" + ` — append a TraceStep
-- ` + "`box_list_task_trace`" + ` — full trace history
-- ` + "`box_get_task`" + ` — fetch task item
+- ` + "`box_set_item_symbols`" + ` — replace any item's symbol set (covers status flip; was box_set_task_status pre-R0.13.2)
+- ` + "`box_append_event`" + ` — append a TraceStep to any item (no kind=task gate)
+- ` + "`box_list_events`" + ` — full event history for any item
+
+Task items use ` + "`box_task_start`" + ` (creates kind=task + opens session)
+and ` + "`box_show`" + ` for reads. ` + "`box_create_task`" + `, ` + "`box_get_task`" + `
+and ` + "`box_set_task_status`" + ` were removed in R0.13.2 — they were
+just kind=task-flavoured aliases of box_store / box_show /
+box_set_item_symbols.
 
 ### 程辙 layer (R0.13.1) (4)
 - ` + "`box_task_start`" + ` — 启程: create task + open session, returns
@@ -165,7 +170,7 @@ sheet:
 // → returns {task, token}. Keep the token.
 
 // 3. work, append trace
-{"tool":"box_append_task_trace","args":{
+{"tool":"box_append_event","args":{
   "task_id":"item_…",
   "step":{"op":"outline","nail_ref":"strategy_sop:outline"}
 }}
@@ -207,7 +212,7 @@ sheet:
 | BM25 / keyword full-text | **R2.2** (future) | Same — agent-side. |
 | Bulk ingest (multi-item per RPC) | **R0.14** (backlog) | Loop ` + "`box_store`" + ` per item. ~10 ms per call locally. |
 | Query predicates (range, compound) | **R0.15** (backlog) | Combine ` + "`box_trace`" + ` + client-side filter. |
-| Item change subscription / watch | **R0.16** (backlog) | Poll ` + "`box_browse`" + ` or ` + "`box_list_task_trace`" + `. |
+| Item change subscription / watch | **R0.16** (backlog) | Poll ` + "`box_browse`" + ` or ` + "`box_list_events`" + `. |
 | Multi-tenant / per-agent token scope | **R4.2 v2** (future) | Single ` + "`BOX_API_TOKEN`" + ` only. |
 
 ## Pitfalls (small but bite often)
@@ -226,7 +231,7 @@ sheet:
 - For HTTP mode, every request needs ` + "`Authorization: Bearer $BOX_API_TOKEN`" + `.
 - Process restart invalidates all live tokens (invariant #11). If you held
   a token across a restart, ` + "`FinishYiCheng`" + ` will refuse; flip 觉痕
-  manually via ` + "`box_set_task_status`" + ` instead.
+  manually via ` + "`box_set_item_symbols`" + ` instead.
 
 ⭐ Source: github.com/trine777/box-model
 `

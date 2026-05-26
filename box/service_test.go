@@ -1338,16 +1338,17 @@ func TestReplaceItemRespectsMaxContentBytes(t *testing.T) {
 // "happy path" tests; individual tests mutate one field to assert a specific
 // validation rule.
 func happyTaskReq() CreateTaskRequest {
+	pc, _ := json.Marshal(PassCriteria{
+		Kind:   "exists",
+		Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
+		Reason: "the R item must exist (agent will check)",
+	})
 	return CreateTaskRequest{
-		Intent: "ship feature X",
-		Source: []Symbol{{Kind: SymTopic, Value: "billing"}},
-		Goal:   []Symbol{{Kind: SymStatus, Value: "✓"}},
-		PassCriteria: PassCriteria{
-			Kind:   "exists",
-			Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
-			Reason: "the R item must exist (agent will check)",
-		},
-		NailChain: []string{"database_engine_forge/a1"},
+		Intent:       "ship feature X",
+		Source:       []Symbol{{Kind: SymTopic, Value: "billing"}},
+		Goal:         []Symbol{{Kind: SymStatus, Value: "✓"}},
+		PassCriteria: pc,
+		NailChain:    []string{"database_engine_forge/a1"},
 	}
 }
 
@@ -1435,27 +1436,36 @@ func TestCreateTaskInvalidGoalSymbol(t *testing.T) {
 	}
 }
 
-func TestCreateTaskInvalidPassCriteriaKind(t *testing.T) {
-	ctx := context.Background()
-	svc := NewService(NewMemoryStore())
-	b := newTaskBox(t, svc, "t5", "alice")
-	req := happyTaskReq()
-	req.PassCriteria.Kind = "weird"
-	_, err := svc.CreateTask(ctx, "alice", b.ID, req)
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("expected ErrValidation, got %v", err)
-	}
-}
+// R0.13.2: pass_criteria is opaque JSON. TestCreateTaskInvalidPassCriteriaKind
+// and TestCreateTaskMissingPassReason (which asserted the kind whitelist and
+// Reason requirement) were removed because Box no longer validates either.
+// The replacement TestPassCriteriaIsOpaqueJSON below verifies the new
+// contract — accept any JSON, reject only invalid JSON.
 
-func TestCreateTaskMissingPassReason(t *testing.T) {
+func TestPassCriteriaIsOpaqueJSON(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(NewMemoryStore())
-	b := newTaskBox(t, svc, "t6", "alice")
+	b := newTaskBox(t, svc, "t-pc-opaque", "alice")
+
+	// Any JSON shape passes (no kind whitelist, no Reason requirement).
+	for _, body := range []string{
+		`{"kind":"weird","whatever":true}`,
+		`{"agent_invented":"shape"}`,
+		`["array","is","fine"]`,
+		`null`,
+		`42`,
+	} {
+		req := happyTaskReq()
+		req.PassCriteria = json.RawMessage(body)
+		if _, err := svc.CreateTask(ctx, "alice", b.ID, req); err != nil {
+			t.Errorf("expected pass_criteria=%q to be accepted, got %v", body, err)
+		}
+	}
+	// Invalid JSON still rejected.
 	req := happyTaskReq()
-	req.PassCriteria.Reason = ""
-	_, err := svc.CreateTask(ctx, "alice", b.ID, req)
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("expected ErrValidation, got %v", err)
+	req.PassCriteria = json.RawMessage(`{not valid`)
+	if _, err := svc.CreateTask(ctx, "alice", b.ID, req); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation on bad JSON, got %v", err)
 	}
 }
 
@@ -1587,7 +1597,7 @@ func TestSetItemSymbolsRejectInvalid(t *testing.T) {
 	}
 }
 
-func TestAppendTaskTraceHappy(t *testing.T) {
+func TestAppendEventHappy(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(NewMemoryStore())
 	b := newTaskBox(t, svc, "t12", "alice")
@@ -1595,12 +1605,12 @@ func TestAppendTaskTraceHappy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
-	if err := svc.AppendTaskTrace(ctx, "alice", task.ID, TraceStep{Op: "store"}); err != nil {
-		t.Fatalf("AppendTaskTrace: %v", err)
+	if err := svc.AppendEvent(ctx, "alice", task.ID, TraceStep{Op: "store"}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
 	}
-	got, err := svc.ListTaskTrace(ctx, "alice", task.ID)
+	got, err := svc.ListEvents(ctx, "alice", task.ID)
 	if err != nil {
-		t.Fatalf("ListTaskTrace: %v", err)
+		t.Fatalf("ListEvents: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected 1 trace step, got %d", len(got))
@@ -1613,7 +1623,7 @@ func TestAppendTaskTraceHappy(t *testing.T) {
 	}
 }
 
-func TestAppendTaskTraceMultiple(t *testing.T) {
+func TestAppendEventMultiple(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(NewMemoryStore())
 	b := newTaskBox(t, svc, "t13", "alice")
@@ -1622,13 +1632,13 @@ func TestAppendTaskTraceMultiple(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	for _, op := range []string{"a", "b", "c"} {
-		if err := svc.AppendTaskTrace(ctx, "alice", task.ID, TraceStep{Op: op}); err != nil {
-			t.Fatalf("AppendTaskTrace %q: %v", op, err)
+		if err := svc.AppendEvent(ctx, "alice", task.ID, TraceStep{Op: op}); err != nil {
+			t.Fatalf("AppendEvent %q: %v", op, err)
 		}
 	}
-	got, err := svc.ListTaskTrace(ctx, "alice", task.ID)
+	got, err := svc.ListEvents(ctx, "alice", task.ID)
 	if err != nil {
-		t.Fatalf("ListTaskTrace: %v", err)
+		t.Fatalf("ListEvents: %v", err)
 	}
 	if len(got) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(got))
@@ -1640,22 +1650,34 @@ func TestAppendTaskTraceMultiple(t *testing.T) {
 	}
 }
 
-func TestAppendTaskTraceRejectsNonTask(t *testing.T) {
+// R0.13.2: AppendEvent works on any item kind (was kind=task-only).
+// This test replaces TestAppendTaskTraceRejectsNonTask, which asserted the
+// gate that R0.13.2 deliberately removed (invariant #10 cleanup).
+func TestAppendEventToAnyItemKind(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(NewMemoryStore())
 	b := newTaskBox(t, svc, "t14", "alice")
-	note, err := svc.Store(ctx, "alice", b.ID, StoreRequest{
-		Kind:       "note",
-		SourceType: "manual",
-		StorageURI: "row://x/note",
-		Symbols:    []Symbol{{Kind: SymKind, Value: "M"}},
-	})
-	if err != nil {
-		t.Fatalf("Store: %v", err)
-	}
-	err = svc.AppendTaskTrace(ctx, "alice", note.ID, TraceStep{Op: "x"})
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("expected ErrValidation, got %v", err)
+	for _, kindSym := range []string{"M", "A", "D", "R"} {
+		note, err := svc.Store(ctx, "alice", b.ID, StoreRequest{
+			Kind:       kindSym + "-item",
+			SourceType: "manual",
+			StorageURI: "row://x/" + kindSym,
+			IdemKey:    "k-" + kindSym,
+			Symbols:    []Symbol{{Kind: SymKind, Value: kindSym}},
+		})
+		if err != nil {
+			t.Fatalf("Store(%s): %v", kindSym, err)
+		}
+		if err := svc.AppendEvent(ctx, "alice", note.ID, TraceStep{Op: "note_event"}); err != nil {
+			t.Errorf("AppendEvent on kind=%s should succeed, got %v", kindSym, err)
+		}
+		events, err := svc.ListEvents(ctx, "alice", note.ID)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		if len(events) != 1 || events[0].Op != "note_event" {
+			t.Errorf("kind=%s: expected 1 event op=note_event, got %v", kindSym, events)
+		}
 	}
 }
 
@@ -1808,88 +1830,11 @@ func TestSchemaValidateCycleDetection(t *testing.T) {
 	}
 }
 
-func TestPassCriteriaCompoundAND(t *testing.T) {
-	ctx := context.Background()
-	svc := NewService(NewMemoryStore())
-	b := newTaskBox(t, svc, "pc1", "alice")
-	req := happyTaskReq()
-	req.PassCriteria = PassCriteria{
-		Kind:     "compound",
-		Operator: "AND",
-		Reason:   "needs both R and ✓ status",
-		SubCriteria: []PassCriteria{
-			{Kind: "exists", Query: SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}}, Reason: "R must exist"},
-			{Kind: "exists", Query: SymbolQuery{Kind: []SymbolKind{SymStatus}, Value: []string{"✓"}}, Reason: "must be done"},
-		},
-	}
-	if _, err := svc.CreateTask(ctx, "alice", b.ID, req); err != nil {
-		t.Fatalf("CreateTask compound AND: %v", err)
-	}
-}
-
-func TestPassCriteriaCompoundDepth(t *testing.T) {
-	ctx := context.Background()
-	svc := NewService(NewMemoryStore())
-	b := newTaskBox(t, svc, "pc2", "alice")
-	leaf := PassCriteria{
-		Kind:   "exists",
-		Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
-		Reason: "leaf",
-	}
-	depth2 := PassCriteria{
-		Kind: "compound", Operator: "OR", Reason: "depth2",
-		SubCriteria: []PassCriteria{leaf, leaf},
-	}
-	depth3 := PassCriteria{
-		Kind: "compound", Operator: "AND", Reason: "depth3",
-		SubCriteria: []PassCriteria{depth2, depth2},
-	}
-	req := happyTaskReq()
-	req.PassCriteria = depth3
-	if _, err := svc.CreateTask(ctx, "alice", b.ID, req); err != nil {
-		t.Fatalf("depth-3 compound rejected unexpectedly: %v", err)
-	}
-}
-
-func TestPassCriteriaRejectDepthOver3(t *testing.T) {
-	ctx := context.Background()
-	svc := NewService(NewMemoryStore())
-	b := newTaskBox(t, svc, "pc3", "alice")
-	leaf := PassCriteria{
-		Kind:   "exists",
-		Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
-		Reason: "leaf",
-	}
-	d2 := PassCriteria{Kind: "compound", Operator: "AND", Reason: "d2", SubCriteria: []PassCriteria{leaf, leaf}}
-	d3 := PassCriteria{Kind: "compound", Operator: "AND", Reason: "d3", SubCriteria: []PassCriteria{d2, d2}}
-	d4 := PassCriteria{Kind: "compound", Operator: "AND", Reason: "d4", SubCriteria: []PassCriteria{d3, d3}}
-	req := happyTaskReq()
-	req.PassCriteria = d4
-	_, err := svc.CreateTask(ctx, "alice", b.ID, req)
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("expected ErrValidation for depth-4 compound, got %v", err)
-	}
-}
-
-func TestPassCriteriaCompoundRequiresMinTwo(t *testing.T) {
-	ctx := context.Background()
-	svc := NewService(NewMemoryStore())
-	b := newTaskBox(t, svc, "pc4", "alice")
-	leaf := PassCriteria{
-		Kind:   "exists",
-		Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
-		Reason: "leaf",
-	}
-	req := happyTaskReq()
-	req.PassCriteria = PassCriteria{
-		Kind: "compound", Operator: "AND", Reason: "only-one",
-		SubCriteria: []PassCriteria{leaf},
-	}
-	_, err := svc.CreateTask(ctx, "alice", b.ID, req)
-	if !errors.Is(err, ErrValidation) {
-		t.Fatalf("expected ErrValidation for compound w/ single sub, got %v", err)
-	}
-}
+// R0.13.2 removed TestPassCriteriaCompoundAND / TestPassCriteriaCompoundDepth
+// / TestPassCriteriaRejectDepthOver3 / TestPassCriteriaCompoundRequiresMinTwo.
+// All four asserted closed-set validation on PassCriteria that R0.13.2
+// eliminated; TestPassCriteriaIsOpaqueJSON (above) replaces them with the
+// new "any JSON shape passes" contract.
 
 // -----------------------------------------------------------------------------
 // R0.13.1 程辙层 (YiCheng / program-track) tests
@@ -1917,9 +1862,9 @@ func TestStartYiChengHappy(t *testing.T) {
 		t.Errorf("expected status →, got %+v", task.Symbols)
 	}
 	// Trace should contain task_start.
-	trace, err := svc.ListTaskTrace(ctx, "alice", task.ID)
+	trace, err := svc.ListEvents(ctx, "alice", task.ID)
 	if err != nil {
-		t.Fatalf("ListTaskTrace: %v", err)
+		t.Fatalf("ListEvents: %v", err)
 	}
 	if len(trace) != 1 || trace[0].Op != "task_start" {
 		t.Fatalf("expected single task_start trace, got %+v", trace)
@@ -1960,7 +1905,7 @@ func TestFinishYiCheng(t *testing.T) {
 		t.Errorf("expected token revoked after Finish")
 	}
 	// Trace tail should be task_finish.
-	trace, _ := svc.ListTaskTrace(ctx, "alice", out.ID)
+	trace, _ := svc.ListEvents(ctx, "alice", out.ID)
 	if trace[len(trace)-1].Op != "task_finish" {
 		t.Errorf("expected tail op=task_finish, got %q", trace[len(trace)-1].Op)
 	}
@@ -2025,7 +1970,7 @@ func TestYiChengTokenAutoTrace(t *testing.T) {
 	}, WithYiChengToken(token)); err != nil {
 		t.Fatalf("Store w/ token: %v", err)
 	}
-	trace, _ := svc.ListTaskTrace(ctx, "alice", task.ID)
+	trace, _ := svc.ListEvents(ctx, "alice", task.ID)
 	foundStoreEvent := false
 	for _, st := range trace {
 		if st.Op == "store" {
@@ -2078,9 +2023,9 @@ func TestCrashRecoveryOrphanScan(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(items))
 	}
-	trace, err := svc2.ListTaskTrace(ctx, "alice", items[0].ID)
+	trace, err := svc2.ListEvents(ctx, "alice", items[0].ID)
 	if err != nil {
-		t.Fatalf("ListTaskTrace: %v", err)
+		t.Fatalf("ListEvents: %v", err)
 	}
 	tail := trace[len(trace)-1]
 	if tail.Op != "orphan_by_crash" {

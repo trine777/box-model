@@ -85,9 +85,10 @@ func unmarshalStructured(t *testing.T, res *mcp.CallToolResult, v any) {
 	}
 }
 
-// 1) ListTools returns the 28 expected box_* tools and nothing else.
-// 17 base + 5 R0.10 task tools + 4 R0.13.1 program-track tools + 2 R4.1
-// self-describing tools (box_manual / box_legend_all).
+// 1) ListTools returns the 26 expected box_* tools and nothing else.
+// R0.13.2: dropped box_create_task / box_get_task / box_set_task_status;
+// added box_set_item_symbols; renamed box_append_task_trace → box_append_event
+// and box_list_task_trace → box_list_events. Total: 28 → 26.
 func TestMCPListTools(t *testing.T) {
 	cs, ctx := dialServer(t, "trine")
 	res, err := cs.ListTools(ctx, nil)
@@ -95,41 +96,39 @@ func TestMCPListTools(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 	want := map[string]bool{
-		"box_create_box":         true,
-		"box_get_box_by_key":     true,
-		"box_seal_box":           true,
-		"box_summary":            true,
-		"box_store":              true,
-		"box_replace_item":       true,
-		"box_update_labels":      true,
-		"box_merge_labels":       true,
-		"box_remove_labels":      true,
-		"box_delete_item":        true,
-		"box_consume":            true,
-		"box_show":               true,
-		"box_browse":             true,
-		"box_list_consumes":      true,
-		"box_trace":              true,
-		"box_legend":             true,
-		"box_neighbors":          true,
-		"box_create_task":        true,
-		"box_set_task_status":    true,
-		"box_append_task_trace":  true,
-		"box_list_task_trace":    true,
-		"box_get_task":           true,
-		"box_task_start":         true,
-		"box_task_finish":        true,
-		"box_task_abort":         true,
-		"box_task_token_status":  true,
-		"box_manual":             true,
-		"box_legend_all":         true,
+		"box_create_box":        true,
+		"box_get_box_by_key":    true,
+		"box_seal_box":          true,
+		"box_summary":           true,
+		"box_store":             true,
+		"box_replace_item":      true,
+		"box_update_labels":     true,
+		"box_merge_labels":      true,
+		"box_remove_labels":     true,
+		"box_delete_item":       true,
+		"box_consume":           true,
+		"box_show":              true,
+		"box_browse":            true,
+		"box_list_consumes":     true,
+		"box_trace":             true,
+		"box_legend":            true,
+		"box_neighbors":         true,
+		"box_set_item_symbols":  true,
+		"box_append_event":      true,
+		"box_list_events":       true,
+		"box_task_start":        true,
+		"box_task_finish":       true,
+		"box_task_abort":        true,
+		"box_task_token_status": true,
+		"box_manual":            true,
+		"box_legend_all":        true,
 	}
 	got := map[string]bool{}
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	if len(got) != 28 {
-		t.Errorf("expected 28 tools, got %d: %v", len(got), got)
+	if len(got) != len(want) {
+		t.Errorf("expected %d tools, got %d: %v", len(want), len(got), got)
 	}
 	for name := range want {
 		if !got[name] {
@@ -359,11 +358,14 @@ func TestMCPErrorPropagation(t *testing.T) {
 	}
 }
 
-// 9) R0.10 task create + append twice + list returns 2 ordered TraceSteps.
-func TestMCPCreateTaskAndListTrace(t *testing.T) {
+// 9) R0.13.2 task-create-via-task_start + event append/list + symbol flip.
+// Replaces TestMCPCreateTaskAndListTrace: box_create_task / box_append_task_
+// trace / box_list_task_trace / box_set_task_status were all removed; the
+// flow today is box_task_start (creates task + starts session) → box_append_
+// event → box_list_events → box_set_item_symbols.
+func TestMCPTaskStartAndEventFlow(t *testing.T) {
 	cs, ctx := dialServer(t, "alice")
 
-	// Build a box first.
 	res := callTool(t, cs, ctx, "box_create_box", map[string]any{"key": "tk", "owner_id": "alice"})
 	if res.IsError {
 		t.Fatalf("create_box: %+v", res.Content)
@@ -371,81 +373,76 @@ func TestMCPCreateTaskAndListTrace(t *testing.T) {
 	var b box.Box
 	unmarshalStructured(t, res, &b)
 
-	// Create the task. Note that pass_criteria.query has Kind/Value populated
-	// (Box validates schema only — it never RUNS the query).
-	res = callTool(t, cs, ctx, "box_create_task", map[string]any{
+	// box_task_start is the canonical task-creator. pass_criteria flows
+	// through as opaque JSON — no Kind whitelist (R0.13.2 cleanup of #10).
+	res = callTool(t, cs, ctx, "box_task_start", map[string]any{
 		"box_id": b.ID,
 		"intent": "ship feature",
 		"goal":   []map[string]any{{"kind": "status", "value": "✓"}},
 		"pass_criteria": map[string]any{
-			"kind": "exists",
-			"query": map[string]any{
-				"kind":  []string{"kind"},
-				"value": []string{"R"},
-			},
-			"reason": "the R item must exist with status ✓",
+			"agent_invented_kind": "anything",
+			"note":                "Box no longer policies this",
 		},
 		"nail_chain": []string{"database_engine_forge/a1"},
 	})
 	if res.IsError {
 		if len(res.Content) > 0 {
 			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
-				t.Fatalf("create_task error: %s", tc.Text)
+				t.Fatalf("task_start error: %s", tc.Text)
 			}
 		}
-		t.Fatalf("create_task error: %+v", res.Content)
+		t.Fatalf("task_start error: %+v", res.Content)
 	}
-	var task box.Item
-	unmarshalStructured(t, res, &task)
-	if task.Kind != "task" {
-		t.Errorf("expected kind=task, got %q", task.Kind)
+	var started struct {
+		Task  box.Item `json:"task"`
+		Token string   `json:"token"`
 	}
+	unmarshalStructured(t, res, &started)
+	if started.Task.Kind != "task" {
+		t.Errorf("expected kind=task, got %q", started.Task.Kind)
+	}
+	taskID := started.Task.ID
 
-	// Append two trace steps.
-	res = callTool(t, cs, ctx, "box_append_task_trace", map[string]any{
-		"task_id": task.ID,
+	// Two box_append_event calls (was box_append_task_trace).
+	res = callTool(t, cs, ctx, "box_append_event", map[string]any{
+		"item_id": taskID,
 		"step":    map[string]any{"op": "store", "nail_ref": "database_engine_forge/a1"},
 	})
 	if res.IsError {
-		if len(res.Content) > 0 {
-			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
-				t.Fatalf("append_task_trace #1: %s", tc.Text)
-			}
-		}
-		t.Fatalf("append_task_trace #1: %+v", res.Content)
+		t.Fatalf("append_event #1: %+v", res.Content)
 	}
-	res = callTool(t, cs, ctx, "box_append_task_trace", map[string]any{
-		"task_id": task.ID,
+	res = callTool(t, cs, ctx, "box_append_event", map[string]any{
+		"item_id": taskID,
 		"step":    map[string]any{"op": "browse"},
 	})
 	if res.IsError {
-		t.Fatalf("append_task_trace #2: %+v", res.Content)
+		t.Fatalf("append_event #2: %+v", res.Content)
 	}
 
-	// List should return both steps in order with Step=0,1.
-	res = callTool(t, cs, ctx, "box_list_task_trace", map[string]any{"task_id": task.ID})
+	// box_list_events should return start + 2 events in order (steps 0,1,2).
+	res = callTool(t, cs, ctx, "box_list_events", map[string]any{"item_id": taskID})
 	if res.IsError {
-		t.Fatalf("list_task_trace: %+v", res.Content)
+		t.Fatalf("list_events: %+v", res.Content)
 	}
-	var out listTaskTraceOutput
+	var out listEventsOutput
 	unmarshalStructured(t, res, &out)
-	if len(out.Trace) != 2 {
-		t.Fatalf("expected 2 trace steps, got %d: %+v", len(out.Trace), out.Trace)
+	if len(out.Events) != 3 {
+		t.Fatalf("expected 3 events (task_start + 2 appended), got %d: %+v", len(out.Events), out.Events)
 	}
-	if out.Trace[0].Step != 0 || out.Trace[1].Step != 1 {
-		t.Errorf("expected step indices 0,1, got %d,%d", out.Trace[0].Step, out.Trace[1].Step)
-	}
-	if out.Trace[0].Op != "store" || out.Trace[1].Op != "browse" {
-		t.Errorf("ops out of order: %+v", out.Trace)
+	if out.Events[1].Op != "store" || out.Events[2].Op != "browse" {
+		t.Errorf("ops out of order: %+v", out.Events)
 	}
 
-	// Status flip: open → done. Should yield kind=T, status=✓ symbols.
-	res = callTool(t, cs, ctx, "box_set_task_status", map[string]any{
-		"task_id": task.ID,
-		"status":  "✓",
+	// box_set_item_symbols (was box_set_task_status) flips status → ✓.
+	res = callTool(t, cs, ctx, "box_set_item_symbols", map[string]any{
+		"item_id": taskID,
+		"symbols": []map[string]any{
+			{"kind": "kind", "value": "T"},
+			{"kind": "status", "value": "✓"},
+		},
 	})
 	if res.IsError {
-		t.Fatalf("set_task_status: %+v", res.Content)
+		t.Fatalf("set_item_symbols: %+v", res.Content)
 	}
 	var updated box.Item
 	unmarshalStructured(t, res, &updated)

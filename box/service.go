@@ -79,8 +79,8 @@ func resolveWriteOpts(opts []WriteOption) writeOpts {
 
 // autoTrace appends a token-derived TraceStep when opts carries a known
 // YiCheng token. The trace event is best-effort: a missing/unknown token is
-// silently skipped; an AppendTaskTrace failure is logged but does not turn
-// the parent write into a failure (program-track is observability, not a
+// silently skipped; an AppendEvent failure is logged but does not turn the
+// parent write into a failure (program-track is observability, not a
 // commit gate — invariant #11).
 //
 // args is a small JSON map summarising the call (e.g. {"item_id":"..."});
@@ -111,7 +111,7 @@ func (s *Service) autoTrace(ctx context.Context, opts writeOpts, op string, args
 		Op:   op,
 		Args: payload,
 	}
-	if err := s.AppendTaskTrace(ctx, sess.CallerID, sess.TaskID, step); err != nil {
+	if err := s.AppendEvent(ctx, sess.CallerID, sess.TaskID, step); err != nil {
 		s.obs.LogWarn("auto-trace failed",
 			"op", "autoTrace",
 			"task_id", sess.TaskID,
@@ -1158,25 +1158,19 @@ func (s *Service) EnsureSymbolBootstrap(ctx context.Context) error {
 	return nil
 }
 
-// CreateTask creates a kind="task" Item with the full R0.10 task schema.
+// CreateTask materialises a kind="task" Item. After R0.13.2 this is just
+// ergonomic sugar — "task" carries no special privileges anywhere else in
+// the Service (trace/get/set all work on any kind). The function survives
+// because StartYiCheng and the CLI/MCP convenience surface still default
+// to this shape; agents writing direct callers may use Store with their
+// own kind name instead.
 //
-// Box validates the schema (Intent, Goal symbols, PassCriteria.Kind enum,
-// NailChain entries) but does NOT interpret PassCriteria.Query — invariant
-// #10. The agent runs Query itself and decides when to flip the task status
-// via SetItemSymbols.
-//
-// On success the returned Item carries:
-//   - Kind = "task"
-//   - Symbols = [{kind:kind, value:"T"}, {kind:status, value:"?"}]
-//   - SourceType = "task"
-//   - Content = JSON {intent, source, goal, pass_criteria, nail_chain}
-//   - StorageURI = row://tasks/<item_id>
-//
-// (trace_count is intentionally NOT stored in content — callers should ask
-// ListTaskTrace if they need the current depth.)
+// Validation is intentionally shallow: Intent + Goal + NailChain + NailDag
+// structure only. PassCriteria flows through as opaque JSON; Box does not
+// look inside (R0.13.2 removed the closed-set Kind whitelist that lingered
+// from R0.10 — see invariant #10).
 func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req CreateTaskRequest) (Item, error) {
-	passKind := req.PassCriteria.Kind
-	tags := map[string]string{"pass_kind": passKind}
+	tags := map[string]string{}
 	s.obs.Inc("task.create.attempt", tags)
 	start := time.Now()
 
@@ -1185,9 +1179,6 @@ func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req Cr
 			return Item{}, fmt.Errorf("%w: intent is required", ErrValidation)
 		}
 		if err := validateGoalSymbols(req.Goal); err != nil {
-			return Item{}, err
-		}
-		if err := validatePassCriteria(req.PassCriteria); err != nil {
 			return Item{}, err
 		}
 		if err := validateNailChain(req.NailChain); err != nil {
@@ -1203,6 +1194,13 @@ func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req Cr
 		for _, sym := range req.Source {
 			if err := ValidateSymbol(sym); err != nil {
 				return Item{}, err
+			}
+		}
+		// pass_criteria, when present, must at least be valid JSON.
+		var passField any
+		if len(req.PassCriteria) > 0 {
+			if err := json.Unmarshal(req.PassCriteria, &passField); err != nil {
+				return Item{}, fmt.Errorf("%w: pass_criteria is not valid JSON: %v", ErrValidation, err)
 			}
 		}
 		b, err := s.store.GetBox(ctx, boxID)
@@ -1223,13 +1221,13 @@ func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req Cr
 			return Item{}, ErrConflict
 		}
 		// Assemble the task content payload. Box stores it verbatim and
-		// never reads Query, NailChain, or Goal fields back during normal
+		// never reads pass_criteria/NailChain/Goal back during normal
 		// operation (invariant #10).
 		payload := map[string]any{
 			"intent":        req.Intent,
 			"source":        req.Source,
 			"goal":          req.Goal,
-			"pass_criteria": req.PassCriteria,
+			"pass_criteria": passField,
 			"nail_chain":    req.NailChain,
 			"nail_dag":      req.NailDag,
 		}
@@ -1271,12 +1269,12 @@ func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req Cr
 		errTags["err_type"] = classifyErr(err)
 		s.obs.Observe("task.create.duration_ms", dur, errTags)
 		s.obs.Inc("task.create.error", errTags)
-		s.obs.LogWarn("create_task failed", "op", "CreateTask", "box_id", boxID, "err", err.Error(), "err_type", errTags["err_type"], "pass_kind", passKind)
+		s.obs.LogWarn("create_task failed", "op", "CreateTask", "box_id", boxID, "err", err.Error(), "err_type", errTags["err_type"])
 		return Item{}, err
 	}
 	s.obs.Observe("task.create.duration_ms", dur, tags)
 	s.obs.Inc("task.create.success", tags)
-	s.obs.LogInfo("task created", "op", "CreateTask", "box_id", boxID, "item_id", item.ID, "pass_kind", passKind)
+	s.obs.LogInfo("task created", "op", "CreateTask", "box_id", boxID, "item_id", item.ID)
 	return item, nil
 }
 
@@ -1334,25 +1332,23 @@ func (s *Service) SetItemSymbols(ctx context.Context, callerID, itemID string, s
 	return out, nil
 }
 
-// AppendTaskTrace appends one TraceStep to a task's trace.jsonl. The item
-// MUST have Kind == "task" (otherwise ErrValidation); the task MUST be the
-// latest revision (history-guard, no opt-in escape — historical tasks are
-// frozen by definition).
+// AppendEvent (R0.13.2 — was AppendTaskTrace) appends one TraceStep to the
+// item's trace.jsonl. Works on items of ANY kind: trace is no longer a
+// task-only privilege. Caller must own the host box and the item must be
+// IsLatest=true (path-ledger semantics: events attach to the current cursor,
+// not to historical revisions).
 //
 // Step.Step is reassigned by the store to "current length". Step.AppendedAt
 // is overwritten to nowUTC().
-func (s *Service) AppendTaskTrace(ctx context.Context, callerID, taskID string, step TraceStep) error {
+func (s *Service) AppendEvent(ctx context.Context, callerID, itemID string, step TraceStep) error {
 	tags := map[string]string{}
-	s.obs.Inc("task.append_trace.attempt", tags)
+	s.obs.Inc("event.append.attempt", tags)
 	start := time.Now()
 
 	err := func() error {
-		item, err := s.store.GetItem(ctx, taskID)
+		item, err := s.store.GetItem(ctx, itemID)
 		if err != nil {
 			return err
-		}
-		if item.Kind != "task" {
-			return fmt.Errorf("%w: item %s is kind=%q, not task", ErrValidation, taskID, item.Kind)
 		}
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
@@ -1362,58 +1358,54 @@ func (s *Service) AppendTaskTrace(ctx context.Context, callerID, taskID string, 
 			return ErrForbidden
 		}
 		if !item.IsLatest {
-			return fmt.Errorf("%w: cannot append trace to non-latest revision of task %s", ErrConflict, taskID)
+			return fmt.Errorf("%w: cannot append event to non-latest revision of item %s", ErrConflict, itemID)
 		}
 		step.AppendedAt = nowUTC()
-		return s.store.AppendTrace(ctx, taskID, step)
+		return s.store.AppendTrace(ctx, itemID, step)
 	}()
 
 	dur := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		errTags := cloneTags(tags)
 		errTags["err_type"] = classifyErr(err)
-		s.obs.Observe("task.append_trace.duration_ms", dur, errTags)
-		s.obs.Inc("task.append_trace.error", errTags)
-		s.obs.LogWarn("append_trace failed", "op", "AppendTaskTrace", "task_id", taskID, "err", err.Error(), "err_type", errTags["err_type"])
+		s.obs.Observe("event.append.duration_ms", dur, errTags)
+		s.obs.Inc("event.append.error", errTags)
+		s.obs.LogWarn("append_event failed", "op", "AppendEvent", "item_id", itemID, "err", err.Error(), "err_type", errTags["err_type"])
 		return err
 	}
-	s.obs.Observe("task.append_trace.duration_ms", dur, tags)
-	s.obs.Inc("task.append_trace.success", tags)
-	s.obs.LogInfo("trace appended", "op", "AppendTaskTrace", "task_id", taskID, "nail_ref", step.NailRef, "tstep_op", step.Op)
+	s.obs.Observe("event.append.duration_ms", dur, tags)
+	s.obs.Inc("event.append.success", tags)
+	s.obs.LogInfo("event appended", "op", "AppendEvent", "item_id", itemID, "nail_ref", step.NailRef, "tstep_op", step.Op)
 	return nil
 }
 
-// ListTaskTrace returns the task's full trace history in append order.
-// Validates Kind=="task" but is otherwise a pure read (no caller gating —
-// mirrors Browse's loose read posture).
-func (s *Service) ListTaskTrace(ctx context.Context, callerID, taskID string) ([]TraceStep, error) {
+// ListEvents (R0.13.2 — was ListTaskTrace) returns the item's full event
+// history in append order. Works on items of ANY kind. Pure read (no caller
+// gating — mirrors Browse's loose read posture).
+func (s *Service) ListEvents(ctx context.Context, callerID, itemID string) ([]TraceStep, error) {
 	tags := map[string]string{}
-	s.obs.Inc("task.list_trace.attempt", tags)
+	s.obs.Inc("event.list.attempt", tags)
 	start := time.Now()
 
 	out, err := func() ([]TraceStep, error) {
-		item, err := s.store.GetItem(ctx, taskID)
-		if err != nil {
+		if _, err := s.store.GetItem(ctx, itemID); err != nil {
 			return nil, err
 		}
-		if item.Kind != "task" {
-			return nil, fmt.Errorf("%w: item %s is kind=%q, not task", ErrValidation, taskID, item.Kind)
-		}
-		return s.store.ListTrace(ctx, taskID)
+		return s.store.ListTrace(ctx, itemID)
 	}()
 
 	dur := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		errTags := cloneTags(tags)
 		errTags["err_type"] = classifyErr(err)
-		s.obs.Observe("task.list_trace.duration_ms", dur, errTags)
-		s.obs.Inc("task.list_trace.error", errTags)
-		s.obs.LogWarn("list_trace failed", "op", "ListTaskTrace", "task_id", taskID, "err", err.Error(), "err_type", errTags["err_type"])
+		s.obs.Observe("event.list.duration_ms", dur, errTags)
+		s.obs.Inc("event.list.error", errTags)
+		s.obs.LogWarn("list_events failed", "op", "ListEvents", "item_id", itemID, "err", err.Error(), "err_type", errTags["err_type"])
 		return nil, err
 	}
-	s.obs.Observe("task.list_trace.duration_ms", dur, tags)
-	s.obs.Inc("task.list_trace.success", tags)
-	s.obs.LogInfo("list_trace ok", "op", "ListTaskTrace", "task_id", taskID, "count", len(out))
+	s.obs.Observe("event.list.duration_ms", dur, tags)
+	s.obs.Inc("event.list.success", tags)
+	s.obs.LogInfo("list_events ok", "op", "ListEvents", "item_id", itemID, "count", len(out))
 	return out, nil
 }
 
@@ -1473,7 +1465,7 @@ func (s *Service) StartYiCheng(ctx context.Context, callerID, boxID string, req 
 			Op:   "task_start",
 			Args: argPayload,
 		}
-		if err := s.AppendTaskTrace(ctx, callerID, task.ID, step); err != nil {
+		if err := s.AppendEvent(ctx, callerID, task.ID, step); err != nil {
 			// Roll the token back so callers never see a "live" session
 			// without a trace anchor.
 			yiChengSessions.Delete(token)
@@ -1539,7 +1531,7 @@ func (s *Service) FinishYiCheng(ctx context.Context, token, statusValue, summary
 			Op:   "task_finish",
 			Args: argPayload,
 		}
-		if err := s.AppendTaskTrace(ctx, sess.CallerID, sess.TaskID, step); err != nil {
+		if err := s.AppendEvent(ctx, sess.CallerID, sess.TaskID, step); err != nil {
 			return Item{}, err
 		}
 		syms := []Symbol{
@@ -1601,7 +1593,7 @@ func (s *Service) AbortYiCheng(ctx context.Context, token, reason string) (Item,
 			Args:  argPayload,
 			Error: reason,
 		}
-		if err := s.AppendTaskTrace(ctx, sess.CallerID, sess.TaskID, step); err != nil {
+		if err := s.AppendEvent(ctx, sess.CallerID, sess.TaskID, step); err != nil {
 			return Item{}, err
 		}
 		syms := []Symbol{

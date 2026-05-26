@@ -224,11 +224,9 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_legend", Description: "Show the documentation entry for a Symbol literal."}, h.handleLegend)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_neighbors", Description: "Print the hop-bounded relation subgraph."}, h.handleNeighbors)
 	// R0.10 task surface — Box is dumb storage; agent runs PassCriteria.Query.
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_create_task", Description: "Create a task item with intent/goal/pass_criteria/nail_chain."}, h.handleCreateTask)
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_set_task_status", Description: "Flip a task's status symbol in place (no new revision)."}, h.handleSetTaskStatus)
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_append_task_trace", Description: "Append one TraceStep to a task's trace log."}, h.handleAppendTaskTrace)
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_list_task_trace", Description: "List the task's full trace history."}, h.handleListTaskTrace)
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_get_task", Description: "Fetch a task item by id; rejects non-task kinds."}, h.handleGetTask)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_set_item_symbols", Description: "Replace an item's symbol set (works on any kind; R0.13.2 supersedes box_set_task_status)."}, h.handleSetItemSymbols)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_append_event", Description: "Append one TraceStep to any item's event log (R0.13.2: no kind=task gate)."}, h.handleAppendEvent)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_list_events", Description: "List the item's full event history (R0.13.2: works on any item)."}, h.handleListEvents)
 	// R0.13.1 程辙层 (program-track layer) — Box stores; agent decides.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_task_start", Description: "Open a YiCheng (program-track) session; returns the task plus a session token."}, h.handleTaskStart)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_task_finish", Description: "Close a YiCheng session with a ✓ task_finish event."}, h.handleTaskFinish)
@@ -705,133 +703,89 @@ func (h *handlers) handleNeighbors(ctx context.Context, _ *mcp.CallToolRequest, 
 	return nil, sub, nil
 }
 
-// ----- R0.10 task tools -----------------------------------------------------
+// ----- R0.13.2 event tools (was R0.10 task tools) --------------------------
+//
+// R0.13.2 removed box_create_task / box_get_task / box_set_task_status from
+// the MCP surface. Three reasons:
+//   - box_create_task is sugar for box_store; agents writing direct calls
+//     can pick their own kind name.
+//   - box_get_task duplicated box_show with a kind=task gate. The gate was
+//     a privilege Box did not need to enforce (invariant #10).
+//   - box_set_task_status was a kind=T-anchored convenience; box_set_item_
+//     symbols is the generalisation and replaces it.
+//
+// Trace tools work on any item, not just kind=task. Schemas use
+// item_id (was task_id). The wire-name shift is box_append_task_trace →
+// box_append_event and box_list_task_trace → box_list_events.
 
-type createTaskInput struct {
-	BoxID        string            `json:"box_id" jsonschema:"target box id (required)"`
-	Intent       string            `json:"intent" jsonschema:"task intent string (required)"`
-	Source       []box.Symbol      `json:"source,omitempty"`
-	Goal         []box.Symbol      `json:"goal" jsonschema:"goal symbols (at least one; required)"`
-	PassCriteria any               `json:"pass_criteria" jsonschema:"pass criteria JSON object (Kind/Query/Reason required; Box never executes Query; supports compound via {kind:compound,operator,sub_criteria})"`
-	NailChain    []string          `json:"nail_chain,omitempty"`
-	NailDag      []box.NailDagNode `json:"nail_dag,omitempty"`
-}
-
-type setTaskStatusInput struct {
-	TaskID       string `json:"task_id" jsonschema:"task item id (required)"`
-	Status       string `json:"status" jsonschema:"new status literal (?, →, ✓, ✗, ~, ◯) (required)"`
-	AllowHistory bool   `json:"allow_history,omitempty"`
-}
-
-type appendTaskTraceInput struct {
-	TaskID string        `json:"task_id" jsonschema:"task item id (required)"`
+type appendEventInput struct {
+	ItemID string        `json:"item_id" jsonschema:"item id (required)"`
 	Step   box.TraceStep `json:"step" jsonschema:"the trace step (op required; nail_ref/args/result/error optional)"`
 }
 
-type listTaskTraceInput struct {
-	TaskID string `json:"task_id" jsonschema:"task item id (required)"`
+type listEventsInput struct {
+	ItemID string `json:"item_id" jsonschema:"item id (required)"`
 }
 
-type listTaskTraceOutput struct {
-	Trace []box.TraceStep `json:"trace"`
+type listEventsOutput struct {
+	Events []box.TraceStep `json:"events"`
 }
 
-type getTaskInput struct {
-	TaskID string `json:"task_id" jsonschema:"task item id (required)"`
+type setItemSymbolsInput struct {
+	ItemID       string       `json:"item_id" jsonschema:"item id (required)"`
+	Symbols      []box.Symbol `json:"symbols" jsonschema:"replacement symbol set (required)"`
+	AllowHistory bool         `json:"allow_history,omitempty"`
 }
 
-func (h *handlers) handleCreateTask(ctx context.Context, _ *mcp.CallToolRequest, in createTaskInput) (*mcp.CallToolResult, any, error) {
-	caller, err := h.resolveCaller(ctx, "", in.BoxID, "")
-	if err != nil {
-		return nil, nil, err
-	}
-	pc, err := decodePassCriteria(in.PassCriteria)
-	if err != nil {
-		return nil, nil, err
-	}
-	item, err := h.svc.CreateTask(ctx, caller, in.BoxID, box.CreateTaskRequest{
-		Intent:       in.Intent,
-		Source:       in.Source,
-		Goal:         in.Goal,
-		PassCriteria: pc,
-		NailChain:    in.NailChain,
-		NailDag:      in.NailDag,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return nil, item, nil
-}
-
-// decodePassCriteria converts the MCP-side raw JSON value into a typed
-// box.PassCriteria. We accept `any` at the wire layer to sidestep the SDK's
-// "cycle detected" panic on the recursive SubCriteria type, then round-trip
-// through encoding/json to enforce the typed contract.
-func decodePassCriteria(raw any) (box.PassCriteria, error) {
-	var pc box.PassCriteria
+// decodePassCriteria flattens an arbitrary JSON value sent over MCP into
+// the json.RawMessage CreateTaskRequest expects. Box does not interpret it
+// further (invariant #10 — R0.13.2 removed the kind whitelist).
+func decodePassCriteria(raw any) (json.RawMessage, error) {
 	if raw == nil {
-		return pc, fmt.Errorf("%w: pass_criteria is required", box.ErrValidation)
+		return nil, nil
 	}
 	buf, err := json.Marshal(raw)
 	if err != nil {
-		return pc, fmt.Errorf("%w: pass_criteria marshal: %v", box.ErrValidation, err)
+		return nil, fmt.Errorf("%w: pass_criteria marshal: %v", box.ErrValidation, err)
 	}
-	if err := json.Unmarshal(buf, &pc); err != nil {
-		return pc, fmt.Errorf("%w: pass_criteria JSON: %v", box.ErrValidation, err)
-	}
-	return pc, nil
+	return buf, nil
 }
 
-func (h *handlers) handleSetTaskStatus(ctx context.Context, _ *mcp.CallToolRequest, in setTaskStatusInput) (*mcp.CallToolResult, any, error) {
-	caller, err := h.resolveCaller(ctx, in.TaskID, "", "")
+func (h *handlers) handleAppendEvent(ctx context.Context, _ *mcp.CallToolRequest, in appendEventInput) (*mcp.CallToolResult, any, error) {
+	caller, err := h.resolveCaller(ctx, in.ItemID, "", "")
 	if err != nil {
 		return nil, nil, err
 	}
-	syms := []box.Symbol{
-		{Kind: box.SymKind, Value: "T"},
-		{Kind: box.SymStatus, Value: in.Status},
+	if err := h.svc.AppendEvent(ctx, caller, in.ItemID, in.Step); err != nil {
+		return nil, nil, err
+	}
+	events, err := h.svc.ListEvents(ctx, caller, in.ItemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, listEventsOutput{Events: events}, nil
+}
+
+func (h *handlers) handleListEvents(ctx context.Context, _ *mcp.CallToolRequest, in listEventsInput) (*mcp.CallToolResult, any, error) {
+	events, err := h.svc.ListEvents(ctx, h.caller, in.ItemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, listEventsOutput{Events: events}, nil
+}
+
+func (h *handlers) handleSetItemSymbols(ctx context.Context, _ *mcp.CallToolRequest, in setItemSymbolsInput) (*mcp.CallToolResult, any, error) {
+	caller, err := h.resolveCaller(ctx, in.ItemID, "", "")
+	if err != nil {
+		return nil, nil, err
 	}
 	var opts []box.UpdateLabelsOption
 	if in.AllowHistory {
 		opts = append(opts, box.WithAllowHistory(true))
 	}
-	item, err := h.svc.SetItemSymbols(ctx, caller, in.TaskID, syms, opts...)
+	item, err := h.svc.SetItemSymbols(ctx, caller, in.ItemID, in.Symbols, opts...)
 	if err != nil {
 		return nil, nil, err
-	}
-	return nil, item, nil
-}
-
-func (h *handlers) handleAppendTaskTrace(ctx context.Context, _ *mcp.CallToolRequest, in appendTaskTraceInput) (*mcp.CallToolResult, any, error) {
-	caller, err := h.resolveCaller(ctx, in.TaskID, "", "")
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := h.svc.AppendTaskTrace(ctx, caller, in.TaskID, in.Step); err != nil {
-		return nil, nil, err
-	}
-	trace, err := h.svc.ListTaskTrace(ctx, caller, in.TaskID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return nil, listTaskTraceOutput{Trace: trace}, nil
-}
-
-func (h *handlers) handleListTaskTrace(ctx context.Context, _ *mcp.CallToolRequest, in listTaskTraceInput) (*mcp.CallToolResult, any, error) {
-	trace, err := h.svc.ListTaskTrace(ctx, h.caller, in.TaskID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return nil, listTaskTraceOutput{Trace: trace}, nil
-}
-
-func (h *handlers) handleGetTask(ctx context.Context, _ *mcp.CallToolRequest, in getTaskInput) (*mcp.CallToolResult, any, error) {
-	item, err := h.svc.GetItem(ctx, h.caller, in.TaskID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if item.Kind != "task" {
-		return nil, nil, fmt.Errorf("%w: item %s is kind=%q, not task", box.ErrValidation, in.TaskID, item.Kind)
 	}
 	return nil, item, nil
 }

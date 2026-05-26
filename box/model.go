@@ -100,12 +100,12 @@ type CreateBoxRequest struct {
 //     must be acyclic. Box validates structure only — DAG execution (topo
 //     sort, branch concurrency, joins) is the agent's job.
 type CreateTaskRequest struct {
-	Intent       string        // required, non-empty
-	Source       []Symbol      // optional (empty for greenfield tasks)
-	Goal         []Symbol      // required, ≥1 entry, each ValidateSymbol-clean
-	PassCriteria PassCriteria  // required
-	NailChain    []string      // R0.10 v1: optional; each entry must be non-empty
-	NailDag      []NailDagNode // R0.10 v2: optional; structurally validated
+	Intent       string          // required, non-empty
+	Source       []Symbol        // optional (empty for greenfield tasks)
+	Goal         []Symbol        // required, ≥1 entry, each ValidateSymbol-clean
+	PassCriteria json.RawMessage // R0.13.2: opaque JSON; Box no longer validates shape. nil = unset.
+	NailChain    []string        // R0.10 v1: optional; each entry must be non-empty
+	NailDag      []NailDagNode   // R0.10 v2: optional; structurally validated
 }
 
 // NailDagNode is one node in a task's nail DAG (R0.10 v2). It replaces the
@@ -127,33 +127,24 @@ type NailDagNode struct {
 	BranchID  string   `json:"branch_id,omitempty"`
 }
 
-// PassCriteria is the agent-facing predicate that decides "is the task done?"
-// Box stores it verbatim but never runs Query — running it is the agent's
-// responsibility (invariant #10).
+// PassCriteria was a typed schema in R0.10–R0.13.1 (Kind whitelist:
+// exists/absent/all_match/count_eq/compound + Operator/SubCriteria).
+// R0.13.2 removed the schema enforcement to honour invariant #10 — Box
+// never knew how to *run* a query, but it still policed *which* queries
+// were stateable, which was a soft form of knowing about task semantics.
 //
-// R0.10 v1 (single-kind mode):
-//   - Kind must be one of {"exists","absent","all_match","count_eq"}.
-//   - Query must have a populated Kind list OR Value list (Ref alone is not
-//     enough — every supported PassCriteria operates on a Trace search).
-//   - Arg is consulted only when Kind == "count_eq"; otherwise it is stored
-//     as-is and ignored.
-//   - Reason must be non-empty (free-text human/agent rationale).
-//
-// R0.10 v2 (compound mode):
-//   - Kind == "compound": Operator must be "AND" or "OR", SubCriteria must
-//     have ≥2 entries, each of which is itself a valid PassCriteria
-//     (recursive shape check). Nesting depth ≤ 3 to bound validation cost.
-//   - Box still never evaluates query or AND/OR — only schema-checks shape.
+// Today PassCriteria lives as opaque json.RawMessage on CreateTaskRequest.
+// The struct is preserved only as a documentation hint for callers who
+// wish to send the canonical shape (e.g. existing trace replayers); Box
+// itself no longer references it.
 type PassCriteria struct {
-	// single-mode (kind ∈ exists/absent/all_match/count_eq)
-	Kind   string      `json:"kind"`
+	Kind   string      `json:"kind,omitempty"`
 	Query  SymbolQuery `json:"query,omitempty"`
 	Arg    int         `json:"arg,omitempty"`
-	Reason string      `json:"reason"`
+	Reason string      `json:"reason,omitempty"`
 
-	// compound-mode (kind == "compound")
-	Operator    string         `json:"operator,omitempty"`     // "AND" | "OR"
-	SubCriteria []PassCriteria `json:"sub_criteria,omitempty"` // ≥2 when compound
+	Operator    string         `json:"operator,omitempty"`
+	SubCriteria []PassCriteria `json:"sub_criteria,omitempty"`
 }
 
 // TraceStep is one append-only event in a task's trace.jsonl.
@@ -230,72 +221,15 @@ type YiCheng struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// passCriteriaKinds is the closed whitelist for PassCriteria.Kind (single
-// mode). Anything outside this set OR "compound" is rejected by
-// validatePassCriteria with ErrValidation.
-var passCriteriaKinds = map[string]struct{}{
-	"exists":    {},
-	"absent":    {},
-	"all_match": {},
-	"count_eq":  {},
-}
-
-// passCriteriaOperators is the closed whitelist for compound-mode operators
-// (R0.10 v2). Lowercase is also accepted via case-insensitive compare in
-// validatePassCriteria.
-var passCriteriaOperators = map[string]struct{}{
-	"AND": {},
-	"OR":  {},
-}
-
-// passCriteriaMaxDepth caps how deep compound PassCriteria may nest (R0.10
-// v2). Box rejects anything deeper to keep validation O(small) and prevent
-// payload-bomb DoS.
-const passCriteriaMaxDepth = 3
-
-// validatePassCriteria enforces the schema-only contract on a PassCriteria
-// value. It explicitly does NOT execute pc.Query, AND/OR semantics, or any
-// sub-criteria — that interpretation is the agent's job (invariant #10).
+// R0.13.2 removed the PassCriteria schema validator (passCriteriaKinds /
+// passCriteriaOperators / passCriteriaMaxDepth / validatePassCriteria /
+// validatePassCriteriaDepth). Box never knew how to *run* a pass_criteria;
+// the surface-level whitelist of Kind values was the last vestige of Box
+// knowing about task semantics, which softly contradicted invariant #10.
 //
-// Two modes:
-//   - single: Kind ∈ {exists,absent,all_match,count_eq}; Query must have
-//     Kind or Value populated; Reason required.
-//   - compound: Kind == "compound"; Operator ∈ {AND,OR}; SubCriteria has ≥2
-//     entries, each validated recursively (depth ≤ passCriteriaMaxDepth).
-func validatePassCriteria(pc PassCriteria) error {
-	return validatePassCriteriaDepth(pc, 1)
-}
-
-func validatePassCriteriaDepth(pc PassCriteria, depth int) error {
-	if depth > passCriteriaMaxDepth {
-		return fmt.Errorf("%w: pass_criteria nesting depth exceeds %d", ErrValidation, passCriteriaMaxDepth)
-	}
-	if pc.Reason == "" {
-		return fmt.Errorf("%w: pass_criteria.reason is required", ErrValidation)
-	}
-	if pc.Kind == "compound" {
-		op := strings.ToUpper(pc.Operator)
-		if _, ok := passCriteriaOperators[op]; !ok {
-			return fmt.Errorf("%w: pass_criteria.operator %q is not one of {AND,OR}", ErrValidation, pc.Operator)
-		}
-		if len(pc.SubCriteria) < 2 {
-			return fmt.Errorf("%w: compound pass_criteria requires sub_criteria of length ≥2 (got %d)", ErrValidation, len(pc.SubCriteria))
-		}
-		for i, sub := range pc.SubCriteria {
-			if err := validatePassCriteriaDepth(sub, depth+1); err != nil {
-				return fmt.Errorf("%w (sub_criteria[%d])", err, i)
-			}
-		}
-		return nil
-	}
-	if _, ok := passCriteriaKinds[pc.Kind]; !ok {
-		return fmt.Errorf("%w: pass_criteria.kind %q is not one of {exists,absent,all_match,count_eq,compound}", ErrValidation, pc.Kind)
-	}
-	if len(pc.Query.Kind) == 0 && len(pc.Query.Value) == 0 {
-		return fmt.Errorf("%w: pass_criteria.query needs Kind or Value populated", ErrValidation)
-	}
-	return nil
-}
+// Today the request carries pass_criteria as opaque json.RawMessage; the
+// only check is "must be valid JSON" (enforced by json.Marshal at the
+// callsite). Agents may invent any predicate shape they want.
 
 // validateGoalSymbols is the Goal-specific symbol validator. Unlike
 // ValidateSymbols (which insists on ≥1 SymKind), goals may describe pure

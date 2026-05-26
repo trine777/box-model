@@ -819,21 +819,22 @@ func TestFileStoreAppendTracePersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBox: %v", err)
 	}
+	pc1, _ := json.Marshal(PassCriteria{
+		Kind:   "exists",
+		Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
+		Reason: "r exists",
+	})
 	task, err := svc1.CreateTask(ctx, "alice", b.ID, CreateTaskRequest{
-		Intent: "do stuff",
-		Goal:   []Symbol{{Kind: SymStatus, Value: "✓"}},
-		PassCriteria: PassCriteria{
-			Kind:   "exists",
-			Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
-			Reason: "r exists",
-		},
+		Intent:       "do stuff",
+		Goal:         []Symbol{{Kind: SymStatus, Value: "✓"}},
+		PassCriteria: pc1,
 	})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
 	for _, op := range []string{"alpha", "beta"} {
-		if err := svc1.AppendTaskTrace(ctx, "alice", task.ID, TraceStep{Op: op}); err != nil {
-			t.Fatalf("AppendTaskTrace: %v", err)
+		if err := svc1.AppendEvent(ctx, "alice", task.ID, TraceStep{Op: op}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
 		}
 	}
 	if err := fs1.Close(); err != nil {
@@ -847,9 +848,9 @@ func TestFileStoreAppendTracePersist(t *testing.T) {
 	}
 	defer fs2.Close()
 	svc2 := NewService(fs2)
-	got, err := svc2.ListTaskTrace(ctx, "alice", task.ID)
+	got, err := svc2.ListEvents(ctx, "alice", task.ID)
 	if err != nil {
-		t.Fatalf("ListTaskTrace: %v", err)
+		t.Fatalf("ListEvents: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 trace steps after reopen, got %d", len(got))
@@ -877,20 +878,21 @@ func TestFileStoreTraceFileLocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBox: %v", err)
 	}
+	pcLoc, _ := json.Marshal(PassCriteria{
+		Kind:   "exists",
+		Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
+		Reason: "x",
+	})
 	task, err := svc.CreateTask(ctx, "alice", b.ID, CreateTaskRequest{
-		Intent: "x",
-		Goal:   []Symbol{{Kind: SymStatus, Value: "✓"}},
-		PassCriteria: PassCriteria{
-			Kind:   "exists",
-			Query:  SymbolQuery{Kind: []SymbolKind{SymKind}, Value: []string{"R"}},
-			Reason: "x",
-		},
+		Intent:       "x",
+		Goal:         []Symbol{{Kind: SymStatus, Value: "✓"}},
+		PassCriteria: pcLoc,
 	})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
-	if err := svc.AppendTaskTrace(ctx, "alice", task.ID, TraceStep{Op: "y"}); err != nil {
-		t.Fatalf("AppendTaskTrace: %v", err)
+	if err := svc.AppendEvent(ctx, "alice", task.ID, TraceStep{Op: "y"}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
 	}
 	expected := filepath.Join(root, "boxes", "loc", "tasks", task.ID+".trace.jsonl")
 	info, err := os.Stat(expected)
