@@ -1,17 +1,63 @@
 # Box Model
 
-Box is a small protocol for storing and browsing AI workflow outputs as a
-multi-dimensional index.
+> **Mental model first:** Box is a **符径 (Symbol Path)** — an append-only
+> path ledger with a typed symbol system. It is NOT a database. It is not
+> a Notion replacement either. Most "common sense" from SQL or document
+> stores will mislead you. Read the design philosophy section before
+> writing any client code.
 
-It is not a database replacement. It sits above source tables, files, object
-storage, repositories, and semantic indexes, giving agents and applications one
-stable way to answer:
+Box is a single-tenant KM (knowledge management) store for one-person
+companies, AI agent workflows, and personal automation. Items live in
+boxes; each item carries free-form labels plus a structured ` + "`symbols`" + `
+array (the "路标" / AI-facing routing layer).
+
+It sits above source tables, files, object storage, repositories, and
+semantic indexes, giving agents and applications one stable way to answer:
 
 - what artifact exists
 - where it came from
 - how it is labeled
 - where the physical content lives
 - who consumed it later
+- which step of a task produced it (via the 程辙 / path-ledger trace)
+
+## Design philosophy (read this first)
+
+This section exists because fresh agents that connect to box-mcp keep
+treating it as a database, then writing confused SQL-like queries against
+it. Box does not have those primitives. The translation table:
+
+| SQL mental model | box-model term | Why different |
+| --- | --- | --- |
+| ` + "`SELECT … WHERE col=…`" + ` | ` + "`box_trace`" + ` (symbol query) / ` + "`box_browse`" + ` (label exact) | No general predicate engine. Index by symbol kind first. |
+| ` + "`JOIN`" + ` | ` + "`box_neighbors`" + ` (relation BFS) | Relations are explicit symbols, not foreign keys. |
+| ` + "`BEGIN…COMMIT`" + ` | ` + "`box_task_start`" + `→` + "`box_task_finish`" + ` | Path ledger, NOT transaction. Finish does NOT freeze. |
+| ` + "`ROLLBACK`" + ` | ` + "`box_task_abort`" + ` (appends ✗) | No reversion. The ✗ becomes history. |
+| ` + "`UPDATE`" + ` | ` + "`box_replace_item`" + ` (new revision) | Old revision is kept. |
+| ACL / GRANT | None | Bearer token = full tenant. Single-tenant by design. |
+| Full-text search | None | R2.1/R2.2 roadmap. Do retrieval agent-side. |
+
+### What box-model does NOT do (and will not)
+
+| Capability | Why we refuse |
+| --- | --- |
+| Multi-user ACL / RBAC | One-person company. Invariant #11. |
+| Box executes ` + "`pass_criteria.query`" + ` | Invariant #10. Verdict is agent work. |
+| Built-in embedding / RAG pipeline | Avoids model lock-in. |
+| Web UI | Pure agent interface. CLI ` + "`box view`" + ` for humans. |
+
+### What is a real gap (on roadmap)
+
+| Capability | R-number | Workaround today |
+| --- | --- | --- |
+| Semantic / vector recall | R2.1 | Agent-side retrieval. |
+| BM25 / keyword search | R2.2 | Agent-side. |
+| Bulk ingest | R0.14 | Loop ` + "`box_store`" + `. |
+| Query predicates (range/compound) | R0.15 | ` + "`box_trace`" + ` + client filter. |
+| Item watch / subscription | R0.16 | Poll. |
+
+The agent-facing version of this lives in the ` + "`box_manual`" + ` MCP tool —
+remote agents should call that first.
 
 ## Core Idea
 

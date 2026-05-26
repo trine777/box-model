@@ -262,6 +262,9 @@
 | R0.10 操作层(综合:storage-only + vehicle + pass_criteria + nail_chain + trace jsonl) | **done** | 224/224 测试;CreateTask/SetItemSymbols/AppendTaskTrace/ListTaskTrace 4 Service 方法;5 新 MCP tools(总 22);trace.jsonl 跨进程持久化;不变式 #10 写入 README;TestBoxDoesNotInterpretPassCriteria 验证 box=dumb storage;新增 D#16 |
 | R0.10 v2 schema + R0.13.1 程辙层 | **done** | 239/239 测试;4 新 MCP tools(22→26);程符 `sync.Map` + 自动 trace 注入;crash-orphan startup hook;不变式 #11/#12 入 README;`TestPathLedgerFinishNotFrozen` 验 path ledger 真实施(FinishYiCheng 后 SetItemSymbols 仍能 flip ✓→→);dev-progress dogfood 实施过程(parent + sub-task + 12 trace events)|
 | R0.X 跨 box 引用统一 | **backlog** | SymRelation.Ref 支持 `item://<box>/<id>` 跨 box URI;Neighbors 跨 box BFS;CLI 暴露 SetItemSymbols;task ⊃ has_part 嵌套真支持;Demo 已 workaround 验证可行(见 dev-progress R0.13.1 task + sub-task) |
+| R0.14 bulk ingest API | **backlog** | `box_store_batch` MCP tool;一次 RPC ≤ N items(默认 100);原子性边界:每 item 独立 idem_key,失败的不回滚已成功的,返回 per-item result;CLI `box import --jsonl <file>`;场景:一本书拆 chunks 灌入、批量同步 docs/ |
+| R0.15 query predicates | **backlog** | `box_browse` 加 `label_predicates` 字段:`{key, op:eq/ne/gt/lt/contains, value}`;`box_trace` 加 `compound`(AND/OR 多组 SymbolQuery);**仍不做** 全文 / 类型推断 / 跨字段表达式 — 那是 R2.x;目的是少几次 client-side filter |
+| R0.16 item watch / subscription | **backlog** | MCP `resources` + `listChanged` notify item-level 变更;轮询桥(`box_watch_box --since=<ts>` 返回 since 后的事件);场景:多 agent 协作时一边写一边看;**不做** WebSocket(MCP 已有 SSE 信道) |
 | R1.1 dev-progress Box | **done** | 14 条需求灌入 `~/.box/boxes/dev-progress/`;版本链 dogfood 验证通过(R1.1 v1→v2) |
 | R1.2 迁入 docs | blocked | 等 R1.1 |
 | R2.x KM 召回 | future | |

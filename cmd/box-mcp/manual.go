@@ -15,24 +15,70 @@ import (
 // docs/mcp.md cross-reference it but don't duplicate the prose.
 const manualMarkdown = `# box-mcp 交通手册 (Traffic Manual)
 
-box-model is a single-tenant KM (knowledge management) store. Items live in
-boxes; each item carries free-form ` + "`labels`" + ` (string→string) plus a
-structured ` + "`symbols`" + ` array (the "路标" / AI-facing routing layer).
+> **Read this section before calling any tool.** Most agents on first
+> contact assume box-mcp is a database with extra ceremony. It is not.
+> Using it that way will produce confused queries and frustrated retries.
+
+## Mental model: this is NOT a database
+
+box-model is a **符径 (Symbol Path)** — an append-only path ledger with a
+typed symbol system bolted on. The closest analogue is not Postgres or
+Mongo; it is closer to a journal + a tag graph. There is **no SQL, no
+joins, no transactions, no cursors, no roles**. There is:
+
+- **Append.** Every write is one more event. Old revisions are kept
+  (` + "`is_latest=false`" + `).
+- **Symbols.** Typed routing tags (kind/status/relation/scope/topic/
+  priority/domain). The primary lookup axis — not labels, not text.
+- **觉痕 (awareness markers).** A status symbol on an item is a *cursor*
+  on its history, NOT a terminal state. Any later event can overwrite it.
+
+## If you came from SQL, here is the translation
+
+| SQL mental model | box-model term | Why different |
+| --- | --- | --- |
+| ` + "`SELECT … WHERE col=…`" + ` | ` + "`box_trace`" + ` (symbol query) or ` + "`box_browse`" + ` (label exact) | No general predicate engine. Index by symbol kind first. |
+| ` + "`JOIN`" + ` | ` + "`box_neighbors`" + ` (hop-bounded relation BFS) | Relations are explicit ` + "`SymRelation`" + ` symbols, not foreign keys. |
+| ` + "`BEGIN … COMMIT`" + ` | ` + "`box_task_start`" + ` → ` + "`box_task_finish`" + ` | This is a **path ledger**, not a transaction. Finish does NOT freeze. No rollback. |
+| ` + "`ROLLBACK`" + ` | ` + "`box_task_abort`" + ` (appends a ✗ event) | No state reversion. The ✗ event becomes part of the history. |
+| ` + "`UPDATE`" + ` | ` + "`box_replace_item`" + ` (new revision) or ` + "`box_set_task_status`" + ` (overwrite 觉痕) | Replace opens a new revision; the old one is kept. Status flip mutates in place. |
+| Primary key | ` + "`item_id`" + ` (server-issued) + ` + "`idem_key`" + ` (caller-issued) | Idempotency at the protocol level, no upsert. |
+| Schema migration | None. ` + "`symbols`" + ` are open-set; ` + "`labels`" + ` are free-form. | Drop in new symbol kinds without DDL. |
+| ACL / GRANT | **There is none.** Bearer token = full access to the tenant. | Single-tenant by design (see capability matrix below). |
+| Full-text search | **Not built in.** ` + "`box_browse`" + ` does exact-label match only. | Roadmap R2.1/R2.2; today, do retrieval in your agent before calling Box. |
+
+## Common anti-patterns (do not do these)
+
+1. **"Let me query by content."** — ` + "`box_browse`" + ` does not scan
+   content. Tag items with topic/scope symbols at store time, then
+   ` + "`box_trace --kind=topic`" + ` later.
+2. **"I'll send box_task_finish a pass/fail and Box will check."** — Box
+   stores pass_criteria; the **agent** executes it. Run your own check,
+   then call ` + "`box_task_finish`" + ` with the verdict.
+3. **"I'll batch insert."** — There is no bulk endpoint yet (R0.14
+   backlog). Today: loop ` + "`box_store`" + ` per item.
+4. **"The task is done, so it's locked."** — No. 合程 is an append, not a
+   freeze. ` + "`box_set_task_status`" + ` can flip ✓ back to → days
+   later. This is invariant #12 and it is intentional.
+5. **"Token is who I am."** — Token is just a session handle for one
+   in-flight 程辙. It is NOT identity. Process restart wipes all tokens.
+6. **"I'll subscribe to changes."** — No item-level watch yet (R0.16
+   backlog). MCP's ` + "`listChanged`" + ` is for tool metadata, not data.
 
 ## Five concepts to know
 
 1. **Box** = a named container. Created with ` + "`box_create_box`" + `.
 2. **Item** = a typed row inside a box. Stored with ` + "`box_store`" + `.
 3. **Symbol** = ` + "`{kind, value, ref?}`" + `. Drives ` + "`box_trace`" + `,
-   ` + "`box_neighbors`" + `, and status flips.
+   ` + "`box_neighbors`" + `, and status flips. **This is the primary
+   lookup mechanism, not labels.**
 4. **Task** = an item with kind=task carrying intent/goal/pass_criteria/
    nail_chain. Created with ` + "`box_create_task`" + `.
 5. **程辙 / YiCheng** = a session-scoped task lifecycle. Open with
    ` + "`box_task_start`" + ` (returns a token), append events with
    ` + "`box_append_task_trace`" + `, close with ` + "`box_task_finish`" + `
-   or ` + "`box_task_abort`" + `. The model is a **path ledger**, not a
-   transaction — 合程 (finish) is just one more append; it does NOT freeze
-   the task.
+   or ` + "`box_task_abort`" + `. **Path ledger, not a transaction.** 合程
+   (finish) is one more append; it does NOT freeze the task.
 
 ## Three invariants (read these once, internalize forever)
 
@@ -142,7 +188,29 @@ sheet:
 {"tool":"box_task_finish","args":{"token":"tsk_…","status":"✓","summary":"draft shipped"}}
 ` + "```" + `
 
-## Pitfalls
+## Capability matrix (what box-model does NOT do, and why)
+
+### By design — these are not coming
+
+| Capability | Why we refuse |
+| --- | --- |
+| Multi-user ACL / RBAC | One-person company. Bearer token = full tenant. Invariant #11. |
+| Box executes ` + "`pass_criteria.query`" + ` | Invariant #10. Verdict is agent work. Box only validates the schema. |
+| Built-in embedding / RAG pipeline | Avoids model lock-in. Box stores ` + "`storage_uri`" + ` and (optional) chunk hashes; agents run their own embedding / retrieval. |
+| Web UI | Pure agent interface. Humans use ` + "`box view / rotate`" + ` CLI; no browser UI is planned. |
+
+### On roadmap — real gaps with R numbers
+
+| Capability | Status | Workaround today |
+| --- | --- | --- |
+| Semantic / vector recall | **R2.1** (future) | Do retrieval in your agent; pass result IDs to ` + "`box_browse`" + `. |
+| BM25 / keyword full-text | **R2.2** (future) | Same — agent-side. |
+| Bulk ingest (multi-item per RPC) | **R0.14** (backlog) | Loop ` + "`box_store`" + ` per item. ~10 ms per call locally. |
+| Query predicates (range, compound) | **R0.15** (backlog) | Combine ` + "`box_trace`" + ` + client-side filter. |
+| Item change subscription / watch | **R0.16** (backlog) | Poll ` + "`box_browse`" + ` or ` + "`box_list_task_trace`" + `. |
+| Multi-tenant / per-agent token scope | **R4.2 v2** (future) | Single ` + "`BOX_API_TOKEN`" + ` only. |
+
+## Pitfalls (small but bite often)
 
 - ` + "`storage_uri`" + ` schemes are whitelisted: ` + "`row://`" + `,
   ` + "`blob://`" + `, ` + "`folder://`" + `, ` + "`repo://`" + `,
@@ -156,6 +224,9 @@ sheet:
 - 合程 (finish) is NOT a freeze. ` + "`SetItemSymbols`" + ` can still
   overwrite 觉痕 afterwards. This is invariant #12.
 - For HTTP mode, every request needs ` + "`Authorization: Bearer $BOX_API_TOKEN`" + `.
+- Process restart invalidates all live tokens (invariant #11). If you held
+  a token across a restart, ` + "`FinishYiCheng`" + ` will refuse; flip 觉痕
+  manually via ` + "`box_set_task_status`" + ` instead.
 
 ⭐ Source: github.com/trine777/box-model
 `
@@ -170,7 +241,7 @@ func (h *handlers) handleManual(ctx context.Context, _ *mcp.CallToolRequest, _ s
 	return nil, manualOutput{
 		Format:  "markdown",
 		Content: manualMarkdown,
-		Version: "0.13.1",
+		Version: "0.13.2",
 	}, nil
 }
 
