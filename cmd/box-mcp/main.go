@@ -21,7 +21,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/windborneos/box-model/box"
@@ -176,6 +178,31 @@ func buildServer(svc *box.Service, cfg config) *mcp.Server {
 	return srv
 }
 
+// schemaWithAnyContent derives the input schema for T via reflection, then
+// rewrites the "content" property from the default Go-` + "`interface{}`" + `
+// rendering (which marshals to bare `true`, the JSON-Schema sentinel for
+// "anything") into an empty schema object (`{}`). Both forms are
+// semantically equivalent — "any JSON value" — but Claude Code's Zod-based
+// validator rejects the boolean-as-schema form and accepts the empty-object
+// form. Used only for box_store / box_replace_item.
+func schemaWithAnyContent[T any]() *jsonschema.Schema {
+	s, err := jsonschema.ForType(reflect.TypeFor[T](), &jsonschema.ForOptions{})
+	if err != nil {
+		panic(fmt.Sprintf("schema gen: %v", err))
+	}
+	if s.Properties != nil {
+		if _, ok := s.Properties["content"]; ok {
+			// A bare `*Schema{}` marshals as `true` (the schema-go library
+			// treats empty as the JSON-Schema boolean-true sentinel). We need
+			// a non-empty object so Zod accepts it, so we plant a Description.
+			s.Properties["content"] = &jsonschema.Schema{
+				Description: "arbitrary JSON content (object, array, scalar, or null)",
+			}
+		}
+	}
+	return s
+}
+
 // registerTools registers every box_* tool on srv. The split keeps buildServer
 // readable and the grep-friendly tool list co-located.
 func registerTools(srv *mcp.Server, h *handlers) {
@@ -183,8 +210,8 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_get_box_by_key", Description: "Resolve a box by its key."}, h.handleGetBoxByKey)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_seal_box", Description: "Seal a box (no further writes)."}, h.handleSealBox)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_summary", Description: "Summarize a box."}, h.handleSummary)
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_store", Description: "Store an item into a box."}, h.handleStore)
-	mcp.AddTool(srv, &mcp.Tool{Name: "box_replace_item", Description: "Open a new revision of an item."}, h.handleReplaceItem)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_store", Description: "Store an item into a box.", InputSchema: schemaWithAnyContent[storeInput]()}, h.handleStore)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_replace_item", Description: "Open a new revision of an item.", InputSchema: schemaWithAnyContent[replaceItemInput]()}, h.handleReplaceItem)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_update_labels", Description: "Replace labels on an item."}, h.handleUpdateLabels)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_merge_labels", Description: "Merge a patch into an item's labels."}, h.handleMergeLabels)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_remove_labels", Description: "Remove keys from an item's labels."}, h.handleRemoveLabels)
