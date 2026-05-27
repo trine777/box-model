@@ -106,9 +106,9 @@ sheet:
 - **scope / topic / domain**: free-form (` + "`[A-Za-z0-9_-]+`" + `,
   ` + "`nf:<ns>`" + ` for domain)
 
-## The 26 tools
+## The 27 tools
 
-### Box / Item CRUD (17)
+### Box / Item CRUD (18)
 - ` + "`box_create_box`" + ` — create a box (key, owner_type, owner_id)
 - ` + "`box_get_box_by_key`" + ` — resolve box id by key
 - ` + "`box_seal_box`" + ` — make read-only
@@ -126,6 +126,7 @@ sheet:
 - ` + "`box_trace`" + ` — Symbol-dimension query (kind/value/ref)
 - ` + "`box_legend`" + ` — doc for one symbol literal
 - ` + "`box_neighbors`" + ` — hop-bounded relation subgraph
+- ` + "`box_overview`" + ` — cross-box geo-globe view (axis × zoom × filter, caller-scoped; R5)
 
 ### Task surface (R0.10) (5)
 - ` + "`box_set_item_symbols`" + ` — replace any item's symbol set (covers status flip; was box_set_task_status pre-R0.13.2)
