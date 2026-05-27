@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -962,6 +963,159 @@ func (s *Service) Summary(ctx context.Context, boxID string) (Summary, error) {
 	s.obs.Inc("box.summary.success", tags)
 	s.obs.LogInfo("summary ok", "op", "Summary", "box_id", boxID, "total_items", out.TotalItems)
 	return out, nil
+}
+
+// Overview returns the R5.1 cross-box geo-globe view: axis × zoom × filter.
+// Caller-scoping is enforced inline (non-caller-owned boxes never surface;
+// they are not Forbidden, they are simply absent — R5.1 D#4).
+func (s *Service) Overview(ctx context.Context, callerID string, req OverviewRequest) (Overview, error) {
+	tags := map[string]string{"axis": req.Axis, "zoom": fmt.Sprintf("%d", req.Zoom)}
+	s.obs.Inc("box.overview.attempt", tags)
+	start := time.Now()
+
+	out, err := func() (Overview, error) {
+		if req.Axis == "" {
+			return Overview{}, fmt.Errorf("%w: axis is required", ErrValidation)
+		}
+		if req.Zoom < 0 || req.Zoom > 1 {
+			return Overview{}, fmt.Errorf("%w: zoom must be 0 or 1 (zoom=2 deferred to R6)", ErrValidation)
+		}
+		if !isOverviewAxis(req.Axis) {
+			return Overview{}, fmt.Errorf("%w: unsupported axis %q (want owner|status|label:<key>)", ErrValidation, req.Axis)
+		}
+
+		boxes, err := s.store.ListBoxes(ctx, req.Filter)
+		if err != nil {
+			return Overview{}, err
+		}
+		// Caller-scoping (R5.1 D#4): drop boxes the caller does not own. We
+		// intentionally do not special-case empty callerID — the Service's
+		// other methods treat callerID="" as "matches nothing" and we follow
+		// the same convention here for the aggregate read.
+		owned := boxes[:0]
+		for _, b := range boxes {
+			if b.OwnerID == callerID {
+				owned = append(owned, b)
+			}
+		}
+
+		ov := Overview{Axis: req.Axis, Zoom: req.Zoom, Total: len(owned)}
+		if req.Zoom == 0 {
+			ov.Histogram = make(map[string]int, len(owned))
+			for _, b := range owned {
+				ov.Histogram[overviewAxisKey(req.Axis, b)]++
+			}
+			return ov, nil
+		}
+		// zoom == 1
+		groupIdx := make(map[string]int)
+		for _, b := range owned {
+			key := overviewAxisKey(req.Axis, b)
+			idx, ok := groupIdx[key]
+			if !ok {
+				ov.Groups = append(ov.Groups, OverviewGroup{Key: key})
+				idx = len(ov.Groups) - 1
+				groupIdx[key] = idx
+			}
+			ov.Groups[idx].Count++
+			if len(ov.Groups[idx].Boxes) < 10 { // D#1: per-group cap
+				ov.Groups[idx].Boxes = append(ov.Groups[idx].Boxes, s.glyphOf(ctx, b))
+			}
+		}
+		return ov, nil
+	}()
+
+	dur := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		errTags := cloneTags(tags)
+		errTags["err_type"] = classifyErr(err)
+		s.obs.Observe("box.overview.duration_ms", dur, errTags)
+		s.obs.Inc("box.overview.error", errTags)
+		s.obs.LogWarn("overview failed", "op", "Overview", "axis", req.Axis, "zoom", req.Zoom, "err", err.Error(), "err_type", errTags["err_type"])
+		return Overview{}, err
+	}
+	s.obs.Observe("box.overview.duration_ms", dur, tags)
+	s.obs.Inc("box.overview.success", tags)
+	s.obs.LogInfo("overview ok", "op", "Overview", "axis", req.Axis, "zoom", req.Zoom, "total", out.Total)
+	return out, nil
+}
+
+// isOverviewAxis reports whether axis is one of the three accepted shapes:
+// "owner", "status", or "label:<key>" (non-empty key).
+func isOverviewAxis(axis string) bool {
+	switch axis {
+	case "owner", "status":
+		return true
+	}
+	if strings.HasPrefix(axis, "label:") && len(axis) > len("label:") {
+		return true
+	}
+	return false
+}
+
+// overviewAxisKey returns the bucket key for box b under the requested axis.
+// For label:<K> a missing/empty value is bucketed under "(unset)".
+func overviewAxisKey(axis string, b Box) string {
+	switch axis {
+	case "owner":
+		return b.OwnerID
+	case "status":
+		return b.Status
+	}
+	if strings.HasPrefix(axis, "label:") {
+		k := axis[len("label:"):]
+		v := b.Labels[k]
+		if v == "" {
+			return "(unset)"
+		}
+		return v
+	}
+	return ""
+}
+
+// glyphOf builds a BoxGlyph for zoom=1 group entries. Items count + latest
+// stored_at come from a cheap Browse(latest-only) — boxes with zero items
+// produce Items=0 / Latest=zero, which is the desired shape.
+func (s *Service) glyphOf(ctx context.Context, b Box) BoxGlyph {
+	g := BoxGlyph{
+		Glyph:  boxGlyphRune(b.Status),
+		Key:    b.Key,
+		ID:     b.ID,
+		Status: b.Status,
+	}
+	if len(b.Labels) > 0 {
+		keys := make([]string, 0, len(b.Labels))
+		for k := range b.Labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if len(keys) > 3 {
+			keys = keys[:3]
+		}
+		g.LabelsTop = keys
+	}
+	items, err := s.store.Browse(ctx, b.ID, BrowseFilter{Limit: 1_000_000})
+	if err == nil {
+		g.Items = len(items)
+		if len(items) > 0 {
+			// Browse returns latest-StoredAt-first (see MemoryStore.Browse),
+			// so items[0] carries the freshest timestamp.
+			g.Latest = items[0].StoredAt
+		}
+	}
+	return g
+}
+
+// boxGlyphRune maps a Box.Status to its visual literal (R5.1 hard constraint
+// #3 — dual-load: every glyph also carries the parallel string Status field).
+func boxGlyphRune(status string) string {
+	switch status {
+	case "active":
+		return "◐"
+	case "sealed":
+		return "◼"
+	}
+	return "○"
 }
 
 // Trace queries items whose Symbols match query. boxKey == "" walks every

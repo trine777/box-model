@@ -104,6 +104,23 @@ Expected demo output:
 }
 ```
 
+## Cross-box overview (R5)
+
+`box_overview` is the **地球仪 (geo-globe)** entry point: caller-scoped,
+caller spins it by `axis` (`owner` / `status` / `label:<key>`) and asks for
+`zoom=0` (pure histogram) or `zoom=1` (top-10 glyphs per bucket). It is the
+same shape as per-box `Summary`, lifted one level up across all boxes the
+caller owns — no flat `[]Box` list ever returned.
+
+```json
+{
+  "axis": "status",
+  "zoom": 0,
+  "total": 7,
+  "histogram": { "active": 5, "sealed": 2 }
+}
+```
+
 ## Repository Layout
 
 ```text

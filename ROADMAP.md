@@ -230,6 +230,69 @@
 
 ---
 
+## Phase 5 · 跨 box 概览(地球仪)
+
+### R5.0 设计:axis × zoom × filter,而不是 `[]Box`
+
+- **背景**:agent 一接 box-mcp 就想问"我都有哪些 box?",但裸 `ListBoxes()`
+  会鼓励 caller 把 box 当 row 平铺、再 client-side filter,违反 box=符径
+  的核心抽象。R5 的核心决策:**像地球仪一样转**——同一个数据集,caller
+  自选 axis 与 zoom 级别,box 给出已聚合的结果。
+- **决策**:
+  - 三轴:`owner` / `status` / `label:<key>`(可扩展)
+  - 两级 zoom:`0` = 纯 histogram(`map[axis_bucket]int`);`1` = top-10
+    BoxGlyph per bucket(machine+human dual-load:`glyph` + `status` 并行字段)
+  - 强制 caller-scoping:只能看到 caller 自己 own 的 box
+  - 长 `[]Box` 列表:**永远不返回**(R5.1 硬约束 #1)
+- **AC**:
+  - [x] 设计文档落 task1 trace,axis/zoom/filter contract 凝固
+  - [x] `Overview` / `OverviewRequest` / `OverviewGroup` / `BoxGlyph` 入
+    `box/model.go`
+
+### R5.1 实现:`Service.Overview` + Store.ListBoxesByOwner
+
+- **依赖**:R5.0
+- **变更**:
+  - `Store` 接口加 `ListBoxesByOwner(callerID) ([]Box, error)`,memory +
+    file 两实现
+  - `Service.Overview(ctx, callerID, OverviewRequest) (Overview, error)`:
+    校验 axis / zoom → 拉 caller 的 box → 应用 `BoxFilter` →
+    zoom=0 聚合 histogram / zoom=1 聚合 + 每 bucket 取 top-10 BoxGlyph
+  - 完整 obs 埋点(attempt / success / error / duration_ms)
+- **AC**:
+  - [x] `TestOverviewZoom0Histogram` / `TestOverviewZoom1TopGlyphs` /
+    `TestOverviewCallerScoping` / `TestOverviewFilterApplied` /
+    `TestOverviewValidation` 全绿(5 个新测试)
+  - [x] zoom=2 返 `ErrValidation`(deferred to R6)
+  - [x] 非 caller-owned 的 box 永不入 total / histogram
+
+### R5.2 MCP 暴露:`box_overview`(取代 deferred 的 `box_list_boxes`)
+
+- **依赖**:R5.1
+- **变更**:
+  - `cmd/box-mcp/main.go` 注册 `box_overview` tool,input schema 自动从
+    `OverviewRequest` 派生
+  - tool 总数 17 → **18**
+  - `docs/mcp.md`:`Not exposed` 区移除 `box_list_boxes`(改为 "shipped as
+    `box_overview` in R5.1/5.2")
+- **AC**:
+  - [x] `TestMCPBoxOverview` E2E:initialize → tools/list 含 box_overview →
+    tools/call 返合法 Overview JSON
+  - [x] `go build ./...` + `go vet ./...` + `go test -count=1 ./...` 全绿
+
+### R5.3 验收 + 文档 + 准备 deploy
+
+- **依赖**:R5.0–R5.2
+- **变更**:
+  - README.md 加"Cross-box overview" 一段(地球仪隐喻 + JSON 形状)
+  - ROADMAP.md 加本章
+  - 本地 commit;`fly deploy --app box-mcp-trine` 等用户拍板
+- **AC**:
+  - [x] 最终 verification suite 三连绿
+  - [x] commit 落地
+
+---
+
 ## 不做清单(明确划掉)
 
 - 多租户 / RBAC / ABAC — 一人公司无意义。
@@ -272,6 +335,7 @@
 | R3.x 治理运维 | future | |
 | R4.1 + R4.2 远端 MCP + Bearer auth + fly 部署 | **done** | 28 tools (26→28: +box_manual +box_legend_all);Streamable-HTTP transport via SDK NewStreamableHTTPHandler;Bearer middleware constant-time;Dockerfile multi-stage distroless 3.9 MB;fly app `box-mcp-trine` @ nrt + box_data 1GB Volume;endpoint https://box-mcp-trine.fly.dev/mcp;/healthz 200;无 Bearer 401;远端 initialize + tools/list + box_manual + box_legend_all 全通 |
 | R4.x HTTP 后续 | future | 解 D#3(caller != consumer);多 token / 多 agent 分权(R4.2 v2);Postgres store(R2.3) |
+| R5.0–R5.3 box_overview 概览层 | **done** | 地球仪隐喻 axis(`owner`/`status`/`label:<key>`)× zoom(0 histogram / 1 top-10 glyph)× filter;caller-scoped 强制;同构 Summary 抬一层;Store 加 `ListBoxesByOwner`;5 新 Service 测试 + 1 MCP E2E;tool 总数 17→18;`box_list_boxes` 从 deferred 改为已 shipped as `box_overview` |
 
 ---
 

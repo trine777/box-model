@@ -235,6 +235,8 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	// R4.1 self-describing tools — for fresh agents discovering box-mcp.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_manual", Description: "Return the box-mcp traffic manual (markdown): symbols, 程辙 flow, all tools and example calls."}, h.handleManual)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_legend_all", Description: "Return all 25 native symbol legend entries (kind/status/relation/priority) in one call."}, h.handleLegendAll)
+	// R5.1 cross-box geo-globe view.
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_overview", Description: "Overview of all boxes (geo-globe model: axis × zoom × filter)."}, h.handleOverview)
 }
 
 // ----- input schemas ------------------------------------------------------
@@ -363,6 +365,17 @@ type legendInput struct {
 type neighborsInput struct {
 	ItemID string `json:"item_id" jsonschema:"item id (required)"`
 	Hops   int    `json:"hops,omitempty" jsonschema:"BFS hop limit; defaults to 1; range [1,5]"`
+}
+
+// overviewInput is the R5.1 box_overview MCP input schema.
+//
+//	axis   — "owner" | "status" | "label:<key>"        (required)
+//	zoom   — 0 (histogram) or 1 (one BoxGlyph per box) (default 0)
+//	filter — orthogonal owner/status/labels limiter    (optional)
+type overviewInput struct {
+	Axis   string         `json:"axis" jsonschema:"axis: owner|status|label:<key> (required)"`
+	Zoom   int            `json:"zoom,omitempty" jsonschema:"granularity; zero=histogram, one=one glyph per box (default zero)"`
+	Filter *box.BoxFilter `json:"filter,omitempty"`
 }
 
 // ----- handlers ----------------------------------------------------------
@@ -878,4 +891,25 @@ func (h *handlers) handleTaskTokenStatus(ctx context.Context, _ *mcp.CallToolReq
 		out.Session = &s
 	}
 	return nil, out, nil
+}
+
+// handleOverview wires box_overview to Service.Overview. The handler does not
+// fall back to box-owner caller resolution — overview is a cross-box read
+// and requires an explicit --owner / $BOX_CALLER so caller-scoping is
+// well-defined (R5.1 D#4).
+func (h *handlers) handleOverview(ctx context.Context, _ *mcp.CallToolRequest, in overviewInput) (*mcp.CallToolResult, any, error) {
+	var filter box.BoxFilter
+	if in.Filter != nil {
+		filter = *in.Filter
+	}
+	req := box.OverviewRequest{
+		Axis:   in.Axis,
+		Zoom:   in.Zoom,
+		Filter: filter,
+	}
+	ov, err := h.svc.Overview(ctx, h.caller, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, ov, nil
 }

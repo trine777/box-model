@@ -122,6 +122,7 @@ func TestMCPListTools(t *testing.T) {
 		"box_task_token_status": true,
 		"box_manual":            true,
 		"box_legend_all":        true,
+		"box_overview":          true,
 	}
 	got := map[string]bool{}
 	for _, tool := range res.Tools {
@@ -454,6 +455,48 @@ func TestMCPTaskStartAndEventFlow(t *testing.T) {
 	}
 	if !foundDone {
 		t.Errorf("expected status=✓ in symbols, got %+v", updated.Symbols)
+	}
+}
+
+// TestE2EBoxOverview — R5.1 box_overview wire-level smoke. Stays RED until
+// task3 implements Service.Overview (today it returns ErrNotImplemented).
+//
+// Creates 2 boxes owned by alice, calls box_overview with axis=owner zoom=0,
+// and asserts the JSON shape: axis="owner", total=2, histogram.alice=2.
+func TestE2EBoxOverview(t *testing.T) {
+	cs, ctx := dialServer(t, "alice")
+	for _, k := range []string{"ov_a", "ov_b"} {
+		res := callTool(t, cs, ctx, "box_create_box", map[string]any{"key": k, "owner_id": "alice"})
+		if res.IsError {
+			t.Fatalf("create_box %s: %+v", k, res.Content)
+		}
+	}
+	res := callTool(t, cs, ctx, "box_overview", map[string]any{
+		"axis": "owner",
+		"zoom": 0,
+	})
+	if res.IsError {
+		// Surface the actual error text so task3 sees what came back.
+		if len(res.Content) > 0 {
+			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+				t.Fatalf("overview error: %s", tc.Text)
+			}
+		}
+		t.Fatalf("overview error: %+v", res.Content)
+	}
+	var ov box.Overview
+	unmarshalStructured(t, res, &ov)
+	if ov.Axis != "owner" {
+		t.Errorf("expected axis=owner, got %q", ov.Axis)
+	}
+	if ov.Total != 2 {
+		t.Errorf("expected total=2, got %d", ov.Total)
+	}
+	if ov.Histogram == nil {
+		t.Fatalf("expected histogram at zoom=0, got nil")
+	}
+	if ov.Histogram["alice"] != 2 {
+		t.Errorf("expected histogram[alice]=2, got %d (full=%+v)", ov.Histogram["alice"], ov.Histogram)
 	}
 }
 

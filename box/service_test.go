@@ -2060,3 +2060,208 @@ func TestPathLedgerFinishNotFrozen(t *testing.T) {
 func startsWith(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
+
+// --- R5.1 box_overview (geo-globe model) red tests -------------------------
+//
+// These four tests pin the contract of Service.Overview before the green
+// implementation exists. They MUST be red against the task2 skeleton (which
+// returns ErrNotImplemented) — task3 turns them green.
+
+// TestOverview_AxisOwner_Zoom0 — three boxes across two owners, axis=owner,
+// zoom=0. Expect a histogram {owner1:2, owner2:1} and Total=3.
+//
+// Caller owns every box here, so caller-scoping is a no-op for this test.
+func TestOverview_AxisOwner_Zoom0(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemoryStore())
+	// Boxes owned by owner1 (×2) and owner2 (×1). callerID matches the box
+	// owner because the Service enforces caller-scoping per box.
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "ov1a", OwnerID: "owner1"}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "ov1b", OwnerID: "owner1"}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "ov2", OwnerID: "owner2"}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	// callerID=* — the green pass aggregates per caller. We send a caller
+	// that owns ov1a+ov1b but NOT ov2 to also fix the caller-scoping bit.
+	ov, err := svc.Overview(ctx, "owner1", OverviewRequest{Axis: "owner", Zoom: 0})
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if ov.Axis != "owner" {
+		t.Errorf("expected axis=owner, got %q", ov.Axis)
+	}
+	if ov.Zoom != 0 {
+		t.Errorf("expected zoom=0, got %d", ov.Zoom)
+	}
+	if ov.Total != 2 {
+		t.Errorf("expected total=2 (caller-scoped: owner1 owns 2 boxes), got %d", ov.Total)
+	}
+	if ov.Histogram == nil {
+		t.Fatalf("expected histogram populated at zoom=0, got nil")
+	}
+	if got := ov.Histogram["owner1"]; got != 2 {
+		t.Errorf("expected histogram[owner1]=2, got %d", got)
+	}
+	if _, present := ov.Histogram["owner2"]; present {
+		t.Errorf("expected owner2 absent from caller-scoped histogram, got %v", ov.Histogram)
+	}
+	if len(ov.Groups) != 0 {
+		t.Errorf("expected nil/empty Groups at zoom=0, got %+v", ov.Groups)
+	}
+}
+
+// TestOverview_AxisStatus_Zoom1 — two active + one sealed box, axis=status,
+// zoom=1. Each group must carry BoxGlyph entries with status+glyph dual-load.
+func TestOverview_AxisStatus_Zoom1(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemoryStore())
+	b1, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "ovs1", OwnerID: "alice"})
+	if err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "ovs2", OwnerID: "alice"}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	b3, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "ovs3", OwnerID: "alice"})
+	if err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	if err := svc.SealBox(ctx, "alice", b3.ID); err != nil {
+		t.Fatalf("SealBox: %v", err)
+	}
+	ov, err := svc.Overview(ctx, "alice", OverviewRequest{Axis: "status", Zoom: 1})
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if ov.Total != 3 {
+		t.Errorf("expected total=3 owned by alice, got %d", ov.Total)
+	}
+	if len(ov.Groups) == 0 {
+		t.Fatalf("expected zoom=1 to populate Groups, got empty")
+	}
+	var activeGroup, sealedGroup *OverviewGroup
+	for i := range ov.Groups {
+		switch ov.Groups[i].Key {
+		case "active":
+			activeGroup = &ov.Groups[i]
+		case "sealed":
+			sealedGroup = &ov.Groups[i]
+		}
+	}
+	if activeGroup == nil || activeGroup.Count != 2 {
+		t.Errorf("expected active group with Count=2, got %+v", activeGroup)
+	}
+	if sealedGroup == nil || sealedGroup.Count != 1 {
+		t.Errorf("expected sealed group with Count=1, got %+v", sealedGroup)
+	}
+	if activeGroup != nil {
+		var foundB1 bool
+		for _, g := range activeGroup.Boxes {
+			if g.ID == b1.ID {
+				foundB1 = true
+				if g.Status != "active" {
+					t.Errorf("expected glyph.status=active, got %q", g.Status)
+				}
+				if g.Glyph == "" {
+					t.Errorf("expected non-empty glyph for active box, got empty")
+				}
+				if g.Key != b1.Key {
+					t.Errorf("expected glyph.key=%q, got %q", b1.Key, g.Key)
+				}
+			}
+		}
+		if !foundB1 {
+			t.Errorf("active group missing b1 (%s); boxes=%+v", b1.ID, activeGroup.Boxes)
+		}
+	}
+}
+
+// TestOverview_AxisLabel_WithFilter — axis=label:project plus a Filter that
+// limits to one owner. Boxes without the label fall into the "" bucket; the
+// owner-scoped filter must hide owner2's box even though the caller owns it.
+func TestOverview_AxisLabel_WithFilter(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemoryStore())
+	// Caller owns all three to isolate the Filter-vs-caller-scoping behaviour.
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{
+		Key: "lov1", OwnerID: "alice",
+		Labels: map[string]string{"project": "atlas"},
+	}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{
+		Key: "lov2", OwnerID: "alice",
+		Labels: map[string]string{"project": "atlas"},
+	}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{
+		Key: "lov3", OwnerID: "alice",
+		Labels: map[string]string{"project": "borealis"},
+	}); err != nil {
+		t.Fatalf("CreateBox: %v", err)
+	}
+	// Filter on owner="alice" — narrowing to alice should be a no-op here
+	// (everyone is alice), but the Service must accept and honour the filter.
+	ov, err := svc.Overview(ctx, "alice", OverviewRequest{
+		Axis:   "label:project",
+		Zoom:   0,
+		Filter: BoxFilter{Owner: "alice"},
+	})
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if ov.Histogram == nil {
+		t.Fatalf("expected histogram, got nil")
+	}
+	if ov.Histogram["atlas"] != 2 {
+		t.Errorf("expected atlas:2, got %d (full=%+v)", ov.Histogram["atlas"], ov.Histogram)
+	}
+	if ov.Histogram["borealis"] != 1 {
+		t.Errorf("expected borealis:1, got %d (full=%+v)", ov.Histogram["borealis"], ov.Histogram)
+	}
+}
+
+// TestOverview_CallerScoped_HidesNonOwned — caller-scoping invariant: a box
+// owned by someone else MUST NOT appear in the overview (not as a count,
+// not as a glyph). R5.1 D#4.
+func TestOverview_CallerScoped_HidesNonOwned(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemoryStore())
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "cs_mine", OwnerID: "alice"}); err != nil {
+		t.Fatalf("CreateBox alice: %v", err)
+	}
+	if _, err := svc.CreateBox(ctx, CreateBoxRequest{Key: "cs_theirs", OwnerID: "bob"}); err != nil {
+		t.Fatalf("CreateBox bob: %v", err)
+	}
+	ov, err := svc.Overview(ctx, "alice", OverviewRequest{Axis: "owner", Zoom: 1})
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if ov.Total != 1 {
+		t.Errorf("expected total=1 (only alice's box), got %d", ov.Total)
+	}
+	// Bob's box must not appear anywhere in groups.
+	for _, g := range ov.Groups {
+		if g.Key == "bob" {
+			t.Errorf("expected no bob group in caller-scoped overview, got %+v", g)
+		}
+		for _, glyph := range g.Boxes {
+			if glyph.Key == "cs_theirs" {
+				t.Errorf("expected bob's box hidden from caller-scoped overview, got %+v", glyph)
+			}
+		}
+	}
+	// Bob's box must also not appear if zoom=0 histogram is requested.
+	ov0, err := svc.Overview(ctx, "alice", OverviewRequest{Axis: "owner", Zoom: 0})
+	if err != nil {
+		t.Fatalf("Overview zoom=0: %v", err)
+	}
+	if _, ok := ov0.Histogram["bob"]; ok {
+		t.Errorf("expected bob absent from caller-scoped histogram, got %+v", ov0.Histogram)
+	}
+}

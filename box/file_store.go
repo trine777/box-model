@@ -1009,6 +1009,22 @@ func countTraceLines(path string) (int, error) {
 	}
 }
 
+// ListBoxes returns boxes that match every populated BoxFilter dimension.
+// An empty filter returns every box. Caller-scoping is the Service layer's
+// responsibility (R5.1 D#4).
+func (s *FileStore) ListBoxes(_ context.Context, filter BoxFilter) ([]Box, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Box, 0, len(s.boxes))
+	for _, b := range s.boxes {
+		if !matchesBoxFilter(b, filter) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
 // AllBoxIDs satisfies the optional boxEnumerator capability used by
 // Service.ScanOrphanTasks.
 func (s *FileStore) AllBoxIDs(_ context.Context) ([]string, error) {

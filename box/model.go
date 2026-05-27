@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	ErrNotFound   = errors.New("not found")
-	ErrConflict   = errors.New("conflict")
-	ErrForbidden  = errors.New("forbidden")
-	ErrValidation = errors.New("validation")
+	ErrNotFound       = errors.New("not found")
+	ErrConflict       = errors.New("conflict")
+	ErrForbidden      = errors.New("forbidden")
+	ErrValidation     = errors.New("validation")
+	ErrNotImplemented = errors.New("not implemented")
 )
 
 type Box struct {
@@ -412,6 +413,65 @@ type Summary struct {
 	ByKind         map[string]int `json:"by_kind"`
 	BySourceType   map[string]int `json:"by_source_type"`
 	LatestStoredAt *time.Time     `json:"latest_stored_at,omitempty"`
+}
+
+// BoxFilter is the orthogonal filter dimension on Overview (R5.1). All three
+// fields AND-combine: a Box must match every populated dimension to land in
+// the result. An empty BoxFilter matches every (caller-owned) box.
+type BoxFilter struct {
+	Owner  string            `json:"owner,omitempty"`
+	Status string            `json:"status,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// OverviewRequest is the R5.1 box_overview input (geo-globe model).
+//
+//   - Axis chooses the rotation: "owner" | "status" | "label:<key>".
+//   - Zoom chooses the granularity: 0 = histogram only (map[string]int),
+//     1 = one BoxGlyph per box (each group's Boxes slice is capped at 10).
+//     Zoom=2 (drill into a single box) is deferred to R6.
+//   - Filter limits the population (orthogonal to axis).
+type OverviewRequest struct {
+	Axis   string    `json:"axis"`
+	Zoom   int       `json:"zoom,omitempty"`
+	Filter BoxFilter `json:"filter,omitempty"`
+}
+
+// Overview is the R5.1 box_overview response.
+//
+// Zoom=0: Groups is map[string]int (the histogram). Groups field is left nil.
+// Zoom=1: Groups is []OverviewGroup (one entry per axis bucket, each carrying
+// up to 10 BoxGlyph entries). Histogram is left nil.
+//
+// Total is the populated-box count after Filter is applied AND caller-scoping
+// is enforced (non-caller-owned boxes never count).
+type Overview struct {
+	Axis      string           `json:"axis"`
+	Zoom      int              `json:"zoom"`
+	Total     int              `json:"total"`
+	Histogram map[string]int   `json:"histogram,omitempty"`
+	Groups    []OverviewGroup  `json:"groups,omitempty"`
+}
+
+// OverviewGroup is one axis bucket at zoom=1. Boxes is capped at 10 — the
+// design rejects long []Box lists as a response shape (R5.1 hard constraint #1).
+type OverviewGroup struct {
+	Key   string     `json:"key"`
+	Count int        `json:"count"`
+	Boxes []BoxGlyph `json:"boxes,omitempty"`
+}
+
+// BoxGlyph is the machine+human dual-load box descriptor (R5.1 hard constraint
+// #3). Glyph is the visual literal ("◐" active, "◼" sealed, etc.); Status is
+// the parallel string field; both are populated.
+type BoxGlyph struct {
+	Glyph     string    `json:"glyph"`
+	Key       string    `json:"key"`
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
+	Items     int       `json:"items"`
+	LabelsTop []string  `json:"labels_top,omitempty"`
+	Latest    time.Time `json:"latest,omitempty"`
 }
 
 func DefaultPolicy() StoragePolicy {

@@ -2,7 +2,7 @@
 
 `box-mcp` exposes the Box Model `Service` façade as an MCP (Model Context
 Protocol) server over stdio. LLM clients (Claude Desktop, mcp-cli, etc.) can
-spawn it as a child process and call the 17 exposed Box tools directly.
+spawn it as a child process and call the 18 exposed Box tools directly.
 
 ## Spawn
 
@@ -24,7 +24,7 @@ Flags:
       "env": {"BOX_HOME": "/path/to/.box"}
     }
 
-## Exposed tools (17)
+## Exposed tools (18)
 
 | Tool | Service method |
 | --- | --- |
@@ -45,6 +45,7 @@ Flags:
 | `box_trace`          | `Service.Trace` |
 | `box_legend`         | `Service.LegendOf` |
 | `box_neighbors`      | `Service.Neighbors` |
+| `box_overview`       | `Service.Overview` — R5.1 geo-globe view over all caller-owned boxes (axis × zoom × filter). |
 
 Each tool's input schema is auto-derived from its typed Go struct in
 `cmd/box-mcp/main.go`; clients receive it via `tools/list`.
@@ -55,7 +56,9 @@ Human-facing surfaces are intentionally omitted to keep tool responses
 machine-friendly JSON:
 
 - `box view` / `box rotate` — human-facing renderings (ASCII / mermaid).
-- `box_legend_all`, `box_list_boxes` — deferred to R0.8.2.
+- `box_legend_all` — deferred to R0.8.2. (`box_list_boxes` shipped as
+  `box_overview` in R5.1/5.2 — caller-scoped, axis × zoom, no long flat
+  `[]Box` list by design.)
 - `import-nailforge` — data-migration tool, not an LLM verb.
 
 ## Errors

@@ -38,6 +38,10 @@ type Store interface {
 	// ListTrace returns the full trace history for a task in append order.
 	// Returns an empty (non-nil) slice when no trace exists yet.
 	ListTrace(ctx context.Context, taskID string) ([]TraceStep, error)
+	// ListBoxes returns every Box matching the filter (AND across populated
+	// dimensions). An empty BoxFilter matches every box. Caller-scoping is
+	// NOT enforced here — that is the Service layer's job (R5.1 D#4).
+	ListBoxes(ctx context.Context, filter BoxFilter) ([]Box, error)
 }
 
 type MemoryStore struct {
@@ -389,6 +393,38 @@ func (s *MemoryStore) ListTrace(_ context.Context, taskID string) ([]TraceStep, 
 	out := make([]TraceStep, len(src))
 	copy(out, src)
 	return out, nil
+}
+
+// ListBoxes returns boxes that match every populated BoxFilter dimension.
+// An empty filter returns every box (in unspecified order). Caller-scoping is
+// the Service layer's responsibility.
+func (s *MemoryStore) ListBoxes(_ context.Context, filter BoxFilter) ([]Box, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Box, 0, len(s.boxes))
+	for _, b := range s.boxes {
+		if !matchesBoxFilter(b, filter) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// matchesBoxFilter is the shared predicate for ListBoxes (memory + file).
+func matchesBoxFilter(b Box, f BoxFilter) bool {
+	if f.Owner != "" && b.OwnerID != f.Owner {
+		return false
+	}
+	if f.Status != "" && b.Status != f.Status {
+		return false
+	}
+	for k, v := range f.Labels {
+		if b.Labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // AllBoxIDs satisfies the optional boxEnumerator capability used by
