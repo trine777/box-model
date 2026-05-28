@@ -1943,6 +1943,31 @@ func (s *Service) AllBoxIDs(ctx context.Context) ([]string, error) {
 	return s.allBoxIDs(ctx)
 }
 
+// ObservabilitySnapshot returns a wire-friendly summary of in-memory
+// counters and timers, or an empty summary if the live observer is the
+// NoopObserver (i.e. the service was built without WithObserver()).
+//
+// Tag-keyed accumulators retain their `name|k=v,…` keys; clients that want
+// just the metric family pass namePrefix (matched against the bare name
+// before `|`). Empty prefix returns everything.
+//
+// Read-only: never mutates observer state. Safe to call concurrently.
+func (s *Service) ObservabilitySnapshot(_ context.Context, namePrefix string) obs.SnapshotSummary {
+	m, ok := s.obs.(*obs.MemObserver)
+	if !ok {
+		return obs.SnapshotSummary{
+			Counters: map[string]int64{},
+			Timers:   map[string]obs.TimerStats{},
+			Observed: map[string]obs.TimerStats{},
+		}
+	}
+	sum := m.Snapshot().Summarize()
+	if namePrefix != "" {
+		sum = sum.FilterPrefix(namePrefix)
+	}
+	return sum
+}
+
 // boxEnumerator is an optional capability some Store implementations honour
 // so ScanOrphanTasks can enumerate every box without adding a method to the
 // public Store interface (which would force a v2 store contract).

@@ -241,6 +241,8 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_task_token_status", Description: "Pure read: report whether a session token is still live."}, h.handleTaskTokenStatus)
 	// R0.19 blob consistency — orphan sweep + missing-ref alert.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_gc_blobs", Description: "Scan items vs disk blobs; report orphans + missing refs; dry_run defaults true."}, h.handleGCBlobs)
+	// R0.22 observability snapshot — exposes the in-memory counters/timers.
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_observability", Description: "Snapshot of in-memory counters + timers (compact stats). Optional name_prefix filter."}, h.handleObservability)
 	// R4.1 self-describing tools — for fresh agents discovering box-mcp.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_manual", Description: "Return the box-mcp traffic manual (markdown): symbols, 程辙 flow, all tools and example calls."}, h.handleManual)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_legend_all", Description: "Return all 25 native symbol legend entries (kind/status/relation/priority) in one call."}, h.handleLegendAll)
@@ -907,6 +909,18 @@ func (h *handlers) handleTaskTokenStatus(ctx context.Context, _ *mcp.CallToolReq
 type gcBlobsInput struct {
 	DryRun         *bool `json:"dry_run,omitempty" jsonschema:"if true (default), report only — do not delete"`
 	OlderThanSec   int   `json:"older_than_seconds,omitempty" jsonschema:"orphans newer than this are spared (default 86400)"`
+}
+
+// ----- R0.22 observability ------------------------------------------------
+
+type observabilityInput struct {
+	NamePrefix string `json:"name_prefix,omitempty" jsonschema:"optional metric-name prefix filter (e.g. 'box.create' returns only matches)"`
+}
+
+// handleObservability surfaces the in-memory MemObserver state as a
+// wire-friendly SnapshotSummary. Read-only.
+func (h *handlers) handleObservability(ctx context.Context, _ *mcp.CallToolRequest, in observabilityInput) (*mcp.CallToolResult, any, error) {
+	return nil, h.svc.ObservabilitySnapshot(ctx, in.NamePrefix), nil
 }
 
 // handleGCBlobs runs one GC pass over the blob root configured for this
