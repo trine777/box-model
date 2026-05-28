@@ -384,7 +384,7 @@ disk only; ` + "`box_gc_blobs`" + ` reclaims them after 24 h. Concretely:
 
 // 3. work, append trace
 {"tool":"box_append_event","args":{
-  "task_id":"item_…",
+  "item_id":"item_…",
   "step":{"op":"outline","nail_ref":"strategy_sop:outline"}
 }}
 
