@@ -553,6 +553,29 @@ func (s *FileStore) SealBox(_ context.Context, id string) error {
 	return nil
 }
 
+// UpdateBoxLabels swaps Box.Labels and bumps Version, then persists box.json
+// atomically (temp file + rename). Sealed boxes are still mutable here —
+// sphere reassignment of an archived box is legitimate metadata work.
+func (s *FileStore) UpdateBoxLabels(_ context.Context, id string, labels map[string]string) (Box, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.boxes[id]
+	if !ok {
+		return Box{}, ErrNotFound
+	}
+	b.Labels = labels
+	b.Version++
+	data, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return Box{}, err
+	}
+	if err := writeFileAtomic(s.boxJSON(b.Key), data); err != nil {
+		return Box{}, err
+	}
+	s.boxes[id] = b
+	return b, nil
+}
+
 func (s *FileStore) CountItems(_ context.Context, boxID string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

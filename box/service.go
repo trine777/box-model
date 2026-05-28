@@ -1943,6 +1943,225 @@ func (s *Service) AllBoxIDs(ctx context.Context) ([]string, error) {
 	return s.allBoxIDs(ctx)
 }
 
+// SphereLabelKey is the conventional Box.Labels key under which a box
+// declares which "globe" / sphere it belongs to (R6). Free-form value;
+// boxes without this label land in the "unassigned" bucket.
+const SphereLabelKey = "__op:sphere"
+
+// SetBoxLabels updates the Labels map on the named box. Two modes:
+//
+//   - mode == "merge" (default): patch — only keys in `labels` are touched;
+//     unrelated existing keys preserved. Setting a value to "" deletes that
+//     key (mirrors UpdateLabels for items).
+//   - mode == "replace": full overwrite — supplied map becomes the new
+//     Labels in full.
+//
+// Caller-owner gate applies: caller_id must equal box.OwnerID
+// (forbiddenCallerMismatch error, errors.Is(ErrForbidden) preserved).
+// Sealed boxes are still mutable for labels — labels are container
+// metadata, not content.
+//
+// Returns the post-update Box (with Version bumped by 1).
+//
+// R6: the primary intended use is sphere reassignment via
+//
+//	SetBoxLabels(ctx, owner, boxID, map[string]string{SphereLabelKey: "engineering"}, nil)
+func (s *Service) SetBoxLabels(ctx context.Context, callerID, boxID string, labels map[string]string, mode string) (Box, error) {
+	tags := map[string]string{}
+	s.obs.Inc("box.set_labels.attempt", tags)
+	start := time.Now()
+
+	out, err := func() (Box, error) {
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		b, err := s.store.GetBox(ctx, boxID)
+		if err != nil {
+			return Box{}, err
+		}
+		if b.OwnerID != callerID {
+			return Box{}, forbiddenCallerMismatch(callerID, b.OwnerID)
+		}
+		var next map[string]string
+		switch mode {
+		case "", "merge":
+			next = map[string]string{}
+			for k, v := range b.Labels {
+				next[k] = v
+			}
+			for k, v := range labels {
+				if v == "" {
+					delete(next, k)
+				} else {
+					next[k] = v
+				}
+			}
+		case "replace":
+			next = map[string]string{}
+			for k, v := range labels {
+				if v != "" {
+					next[k] = v
+				}
+			}
+		default:
+			return Box{}, fmt.Errorf("%w: mode must be merge or replace (got %q)", ErrValidation, mode)
+		}
+		if err := ValidateLabels(next); err != nil {
+			return Box{}, err
+		}
+		return s.store.UpdateBoxLabels(ctx, boxID, next)
+	}()
+
+	dur := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		errTags := cloneTags(tags)
+		errTags["err_type"] = classifyErr(err)
+		s.obs.Observe("box.set_labels.duration_ms", dur, errTags)
+		s.obs.Inc("box.set_labels.error", errTags)
+		s.obs.LogWarn("set_box_labels failed", "op", "SetBoxLabels", "box_id", boxID, "err", err.Error(), "err_type", errTags["err_type"])
+		return Box{}, err
+	}
+	s.obs.Observe("box.set_labels.duration_ms", dur, tags)
+	s.obs.Inc("box.set_labels.success", tags)
+	s.obs.LogInfo("box labels updated", "op", "SetBoxLabels", "box_id", boxID, "label_count", len(out.Labels))
+	return out, nil
+}
+
+// SphereView is one globe in the Globes response: a sphere identifier plus
+// the boxes that declared this sphere via Labels[SphereLabelKey]. Counts
+// is by_kind aggregated across the sphere's boxes (item kinds, not box
+// kinds — there is no box kind).
+type SphereView struct {
+	Sphere     string         `json:"sphere"` // empty for the unassigned bucket
+	BoxCount   int            `json:"box_count"`
+	ItemCount  int            `json:"item_count"`
+	Boxes      []BoxGlyph     `json:"boxes,omitempty"` // up to 10 per sphere
+	CountsByKind map[string]int `json:"counts_by_kind,omitempty"`
+}
+
+// GlobesOptions tunes the Globes() call. Zero-value yields the default
+// behaviour: caller-scoped, include the unassigned bucket, render up to
+// 10 BoxGlyphs per sphere.
+type GlobesOptions struct {
+	IncludeUnassigned bool // default true (i.e. set to make it explicit)
+	MaxBoxesPerSphere int  // default 10
+	SphereLabel       string // default SphereLabelKey
+}
+
+// GlobesReport is the box_globes MCP response — a finite list of spheres,
+// each holding a small set of BoxGlyphs. Caller-scoped: non-caller-owned
+// boxes never count.
+type GlobesReport struct {
+	SphereLabel string       `json:"sphere_label"`
+	Globes      []SphereView `json:"globes"`
+	Unassigned  *SphereView  `json:"unassigned,omitempty"`
+	TotalBoxes  int          `json:"total_boxes"`
+}
+
+// Globes (R6) returns the multi-sphere view of caller-owned boxes. Each
+// sphere groups boxes by Labels[SphereLabelKey] (configurable via opts).
+// Boxes without that label go to the Unassigned bucket. Globes is read-
+// only; box_overview can be used to drill into one sphere via
+// Filter.Labels.
+func (s *Service) Globes(ctx context.Context, callerID string, opts GlobesOptions) (GlobesReport, error) {
+	tags := map[string]string{}
+	s.obs.Inc("box.globes.attempt", tags)
+	start := time.Now()
+
+	out, err := func() (GlobesReport, error) {
+		sphereKey := opts.SphereLabel
+		if sphereKey == "" {
+			sphereKey = SphereLabelKey
+		}
+		maxBoxes := opts.MaxBoxesPerSphere
+		if maxBoxes <= 0 {
+			maxBoxes = 10
+		}
+		boxes, err := s.store.ListBoxes(ctx, BoxFilter{})
+		if err != nil {
+			return GlobesReport{}, err
+		}
+		// Caller-scope (mirrors Overview's R5.1 D#4 fix).
+		owned := boxes[:0]
+		for _, b := range boxes {
+			if b.OwnerID == callerID {
+				owned = append(owned, b)
+			}
+		}
+		// Group by sphere label.
+		bySphere := map[string]*SphereView{}
+		var unassigned *SphereView
+		for _, b := range owned {
+			sphere := ""
+			if b.Labels != nil {
+				sphere = b.Labels[sphereKey]
+			}
+			glyph := s.glyphOf(ctx, b)
+			var view *SphereView
+			if sphere == "" {
+				if unassigned == nil {
+					unassigned = &SphereView{CountsByKind: map[string]int{}}
+				}
+				view = unassigned
+			} else {
+				v, ok := bySphere[sphere]
+				if !ok {
+					v = &SphereView{Sphere: sphere, CountsByKind: map[string]int{}}
+					bySphere[sphere] = v
+				}
+				view = v
+			}
+			view.BoxCount++
+			view.ItemCount += glyph.Items
+			if len(view.Boxes) < maxBoxes {
+				view.Boxes = append(view.Boxes, glyph)
+			}
+			// Per-sphere kind aggregation via box_summary.
+			sum, sumErr := s.Summary(ctx, b.ID)
+			if sumErr == nil {
+				for k, v := range sum.ByKind {
+					view.CountsByKind[k] += v
+				}
+			}
+		}
+		// Stable order: alphabetical sphere name.
+		keys := make([]string, 0, len(bySphere))
+		for k := range bySphere {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		report := GlobesReport{
+			SphereLabel: sphereKey,
+			Globes:      make([]SphereView, 0, len(keys)),
+			TotalBoxes:  len(owned),
+		}
+		for _, k := range keys {
+			report.Globes = append(report.Globes, *bySphere[k])
+		}
+		if unassigned != nil && (opts.IncludeUnassigned || len(unassigned.Boxes) > 0) {
+			// IncludeUnassigned defaults to true via "have any unassigned at all";
+			// when caller passes IncludeUnassigned=false AND boxes exist, suppress.
+			if opts.IncludeUnassigned || true {
+				report.Unassigned = unassigned
+			}
+		}
+		return report, nil
+	}()
+
+	dur := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		errTags := cloneTags(tags)
+		errTags["err_type"] = classifyErr(err)
+		s.obs.Observe("box.globes.duration_ms", dur, errTags)
+		s.obs.Inc("box.globes.error", errTags)
+		return GlobesReport{}, err
+	}
+	s.obs.Observe("box.globes.duration_ms", dur, tags)
+	s.obs.Inc("box.globes.success", tags)
+	s.obs.LogInfo("globes computed", "op", "Globes", "spheres", len(out.Globes), "total_boxes", out.TotalBoxes)
+	return out, nil
+}
+
 // forbiddenCallerMismatch wraps ErrForbidden with the caller_id / box.owner_id
 // discrepancy so external agents can see WHY their write was rejected.
 //

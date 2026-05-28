@@ -42,6 +42,11 @@ type Store interface {
 	// dimensions). An empty BoxFilter matches every box. Caller-scoping is
 	// NOT enforced here — that is the Service layer's job (R5.1 D#4).
 	ListBoxes(ctx context.Context, filter BoxFilter) ([]Box, error)
+	// UpdateBoxLabels overwrites a box's Labels map in place — same semantics
+	// as UpdateLabels does for items: no new version, no immutability shim.
+	// Bumps Box.Version so external watchers can detect the change.
+	// Caller authorisation is enforced at the Service layer (R6 sphere work).
+	UpdateBoxLabels(ctx context.Context, boxID string, labels map[string]string) (Box, error)
 }
 
 type MemoryStore struct {
@@ -124,6 +129,23 @@ func (s *MemoryStore) SealBox(_ context.Context, id string) error {
 	b.Status = "sealed"
 	s.boxes[id] = b
 	return nil
+}
+
+// UpdateBoxLabels swaps the Labels map in place and bumps Box.Version. Sealed
+// boxes are still mutable here — labels are metadata about the container, not
+// content; sphere reassignment of an archived box is a legitimate operation.
+// Authorisation is the Service layer's job.
+func (s *MemoryStore) UpdateBoxLabels(_ context.Context, id string, labels map[string]string) (Box, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.boxes[id]
+	if !ok {
+		return Box{}, ErrNotFound
+	}
+	b.Labels = labels
+	b.Version++
+	s.boxes[id] = b
+	return b, nil
 }
 
 func (s *MemoryStore) CountItems(_ context.Context, boxID string) (int, error) {

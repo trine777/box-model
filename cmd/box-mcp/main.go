@@ -243,6 +243,9 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_gc_blobs", Description: "Scan items vs disk blobs; report orphans + missing refs; dry_run defaults true."}, h.handleGCBlobs)
 	// R0.22 observability snapshot — exposes the in-memory counters/timers.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_observability", Description: "Snapshot of in-memory counters + timers (compact stats). Optional name_prefix filter."}, h.handleObservability)
+	// R6 sphere navigation — multi-globe view + box-level label edits.
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_set_box_labels", Description: "Update Labels map on a box (mode: merge|replace). Caller==box.owner gate. R6: assign sphere via __op:sphere label."}, h.handleSetBoxLabels)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_globes", Description: "Multi-sphere overview: group caller-owned boxes by __op:sphere label, return BoxGlyphs + counts per sphere + unassigned bucket."}, h.handleGlobes)
 	// R4.1 self-describing tools — for fresh agents discovering box-mcp.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_manual", Description: "Return the box-mcp traffic manual (markdown): symbols, 程辙 flow, all tools and example calls."}, h.handleManual)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_legend_all", Description: "Return all 25 native symbol legend entries (kind/status/relation/priority) in one call."}, h.handleLegendAll)
@@ -909,6 +912,44 @@ func (h *handlers) handleTaskTokenStatus(ctx context.Context, _ *mcp.CallToolReq
 type gcBlobsInput struct {
 	DryRun         *bool `json:"dry_run,omitempty" jsonschema:"if true (default), report only — do not delete"`
 	OlderThanSec   int   `json:"older_than_seconds,omitempty" jsonschema:"orphans newer than this are spared (default 86400)"`
+}
+
+// ----- R6 sphere navigation ----------------------------------------------
+
+type setBoxLabelsInput struct {
+	BoxID  string            `json:"box_id" jsonschema:"box id (required)"`
+	Labels map[string]string `json:"labels" jsonschema:"label patch; '' value deletes the key (required)"`
+	Mode   string            `json:"mode,omitempty" jsonschema:"merge (default) or replace"`
+}
+
+func (h *handlers) handleSetBoxLabels(ctx context.Context, _ *mcp.CallToolRequest, in setBoxLabelsInput) (*mcp.CallToolResult, any, error) {
+	caller, err := h.resolveCaller(ctx, "", in.BoxID, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := h.svc.SetBoxLabels(ctx, caller, in.BoxID, in.Labels, in.Mode)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, out, nil
+}
+
+type globesInput struct {
+	IncludeUnassigned bool   `json:"include_unassigned,omitempty" jsonschema:"include the no-sphere bucket even if empty (default: include only if non-empty)"`
+	MaxBoxesPerSphere int    `json:"max_boxes_per_sphere,omitempty" jsonschema:"BoxGlyph cap per sphere (default 10)"`
+	SphereLabel       string `json:"sphere_label,omitempty" jsonschema:"override the conventional __op:sphere label key"`
+}
+
+func (h *handlers) handleGlobes(ctx context.Context, _ *mcp.CallToolRequest, in globesInput) (*mcp.CallToolResult, any, error) {
+	out, err := h.svc.Globes(ctx, h.caller, box.GlobesOptions{
+		IncludeUnassigned: in.IncludeUnassigned,
+		MaxBoxesPerSphere: in.MaxBoxesPerSphere,
+		SphereLabel:       in.SphereLabel,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, out, nil
 }
 
 // ----- R0.22 observability ------------------------------------------------
