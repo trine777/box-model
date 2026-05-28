@@ -26,11 +26,25 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, stderr io.Writer)
 	}
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
-	authed := withBearer(token, mcpHandler)
+	authedMCP := withBearer(token, mcpHandler)
+
+	// R0.18: local-FS blob layer mounted alongside the MCP routes. Routes
+	// register on a sub-mux so we can put the whole thing behind the same
+	// Bearer middleware without per-route boilerplate.
+	root, err := blobRoot(cfg.boxHome)
+	if err != nil {
+		return fmt.Errorf("resolve blob root: %w", err)
+	}
+	blobMux := http.NewServeMux()
+	if err := registerBlobRoutes(blobMux, root); err != nil {
+		return fmt.Errorf("register blob routes: %w", err)
+	}
+	authedBlob := withBearer(token, blobMux)
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", authed)
-	mux.Handle("/mcp/", authed) // trailing-slash variant some clients send
+	mux.Handle("/mcp", authedMCP)
+	mux.Handle("/mcp/", authedMCP) // trailing-slash variant some clients send
+	mux.Handle("/blob/", authedBlob)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -44,7 +58,7 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, stderr io.Writer)
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stderr, "box-mcp listening on %s (Streamable-HTTP /mcp; Bearer required)\n", cfg.httpAddr)
+		fmt.Fprintf(stderr, "box-mcp listening on %s (Streamable-HTTP /mcp + /blob/* ; Bearer required; blob root %s)\n", cfg.httpAddr, root)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
