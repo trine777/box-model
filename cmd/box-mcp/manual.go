@@ -19,6 +19,69 @@ const manualMarkdown = `# box-mcp 交通手册 (Traffic Manual)
 > contact assume box-mcp is a database with extra ceremony. It is not.
 > Using it that way will produce confused queries and frustrated retries.
 
+## Streamable-HTTP MCP transport quickstart (read first if you're not Claude)
+
+If you reached this server over HTTP (` + "`/mcp`" + ` endpoint), the wire format is
+**JSON-RPC 2.0 over SSE**, not plain HTTP/JSON. Three things every fresh
+client needs to get right:
+
+1. **Initialize handshake first.** Send POST ` + "`/mcp`" + ` with body
+   ` + "`{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"X\",\"version\":\"0.1\"}}}`" + `.
+   Headers MUST include ` + "`Content-Type: application/json`" + ` AND
+   ` + "`Accept: application/json, text/event-stream`" + ` (server only speaks SSE).
+
+2. **Capture ` + "`Mcp-Session-Id`" + ` response header.** Server returns it on the
+   initialize response; send it back as a request header on every
+   subsequent call. Without it the next call starts a fresh session.
+
+3. **Send ` + "`notifications/initialized`" + ` exactly once.** A JSON-RPC
+   notification (no ` + "`id`" + ` field), method=` + "`notifications/initialized`" + `,
+   params=` + "`{}`" + `, with the captured ` + "`Mcp-Session-Id`" + ` header. Server treats
+   subsequent ` + "`tools/call`" + ` invocations as out-of-protocol if you skip this.
+
+Response framing: every response is one or more SSE event blocks. Each
+block has lines like ` + "`event: message\\ndata: {…json…}\\n\\n`" + `. The JSON-RPC
+payload is the ` + "`data:`" + ` line — grep it, parse the JSON. ` + "`/healthz`" + ` (no
+auth) is the only route that returns plain text.
+
+curl template (all in one):
+
+` + "```bash" + `
+TOKEN="<bearer>"
+URL="https://box-mcp-trine.fly.dev"
+
+# Step 1: initialize, capture Mcp-Session-Id
+curl -sS -D /tmp/h "$URL/mcp" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -H "Accept: application/json, text/event-stream" \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"x","version":"0.1"}}}' \\
+  > /dev/null
+SID=$(grep -i "^Mcp-Session-Id:" /tmp/h | tr -d '\\r' | awk '{print $2}')
+
+# Step 2: notifications/initialized (no id)
+curl -sS "$URL/mcp" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -H "Accept: application/json, text/event-stream" \\
+  -H "Mcp-Session-Id: $SID" \\
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \\
+  > /dev/null
+
+# Step 3: now you can call tools. Parse the data: line out of SSE response.
+curl -sS "$URL/mcp" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -H "Accept: application/json, text/event-stream" \\
+  -H "Mcp-Session-Id: $SID" \\
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"box_manual","arguments":{}}}' \\
+  | grep "^data:" | sed 's/^data: //' | jq -r '.result.content[0].text'
+` + "```" + `
+
+If you skip step 2 you'll see server errors like "session not initialized";
+if you skip the SSE ` + "`Accept:`" + ` you'll see 406 Not Acceptable.
+
+
 ## Mental model: this is NOT a database
 
 box-model is a **符径 (Symbol Path)** — an append-only path ledger with a
@@ -247,6 +310,43 @@ curl -sS "$URL/items/<item_id>/blob" \
 # Headers include ETag = sha256 — verify with shasum -a 256 if paranoid.
 # Range supported: -H "Range: bytes=0-1023" for partial.
 ` + "```" + `
+
+### Two hashes, do not confuse them
+
+` + "`box_store`" + ` returns an Item whose body contains ` + "`content_hash`" + `. This is
+the sha256 of the **JSON metadata payload you sent in ` + "`content`" + `**, not the
+sha of the underlying bytes. The blob layer's sha (returned by
+` + "`/blob/upload`" + `) is a separate value covering the actual file bytes.
+
+| Field | What it hashes | Where you see it |
+| --- | --- | --- |
+| ` + "`item.content_hash`" + ` | The metadata JSON in ` + "`item.Content`" + ` (e.g. ` + "`{\"name\":\"x.pdf\"}`" + `) | ` + "`box_store`" + ` response, ` + "`box_show`" + ` response |
+| blob sha256 | The raw bytes you POSTed to ` + "`/blob/upload`" + ` | ` + "`/blob/upload`" + ` response, ETag on GETs, ` + "`X-Box-Sha256`" + ` header, the ` + "`<sha>`" + ` in ` + "`storage_uri: blob://sha256/<sha>`" + ` |
+
+Round-trip verification for the upload uses the **blob sha**, not
+` + "`content_hash`" + `. If you store the same bytes twice with different metadata
+JSON, the blob sha is identical (dedup); the ` + "`content_hash`" + ` of the two
+items differs because the metadata differs.
+
+### Format whitelist vs storage_uri scheme (independent gates)
+
+These are two unrelated checks; agents sometimes confuse them.
+
+- **` + "`item.format`" + `** (` + "`json`" + `, ` + "`markdown`" + `, ` + "`text`" + `, ` + "`binary`" + `, ` + "`pdf`" + `, ` + "`png`" + ` …)
+  — must appear in the box's ` + "`storage_policy.allowed_formats`" + ` list. The
+  default policy is ` + "`[\"json\",\"markdown\",\"text\"]`" + `; create the box with
+  ` + "`storage_policy.allowed_formats:[\"binary\",\"pdf\",…]`" + ` to admit other
+  formats. Validation is a string-set check on the value of ` + "`item.format`" + `.
+
+- **` + "`item.storage_uri`" + ` scheme** (` + "`row://`" + `, ` + "`blob://sha256/`" + `, ` + "`s3://`" + `,
+  ` + "`folder://`" + `, ` + "`repo://`" + `, ` + "`ipfs://`" + `, ` + "`collection://`" + `) — must be one of
+  these seven prefixes. This says where the bytes LIVE; the format is what
+  they ARE. Box validates the prefix but never dereferences the URI
+  (invariant #10).
+
+A typical blob-backed PDF item would set ` + "`format: \"pdf\"`" + ` AND ` + "`storage_uri:\n  \"blob://sha256/<sha>\"`" + ` — both checks must pass. Make sure your box's
+` + "`allowed_formats`" + ` includes ` + "`\"pdf\"`" + ` (or whatever you choose) when you
+create it.
 
 ### Atomicity & retry semantics
 
