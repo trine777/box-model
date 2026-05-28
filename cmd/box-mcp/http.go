@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/windborneos/box-model/box"
 )
 
 // runHTTP serves the MCP server over Streamable-HTTP at cfg.httpAddr. It
@@ -19,7 +21,11 @@ import (
 //
 // The single server instance is shared across all incoming requests; the SDK's
 // StreamableHTTPHandler manages per-connection sessions on its own.
-func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, stderr io.Writer) error {
+//
+// R0.19: in addition to /mcp + /blob/*, mount /items/<id>/blob — a one-shot
+// download path for external machines that hold only an item id. Resolves
+// the item, parses storage_uri, streams the blob.
+func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, svc *box.Service, defaultCaller string, stderr io.Writer) error {
 	token := os.Getenv("BOX_API_TOKEN")
 	if token == "" {
 		return fmt.Errorf("BOX_API_TOKEN env required for --http mode (refusing to serve unauthenticated)")
@@ -41,10 +47,17 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, stderr io.Writer)
 	}
 	authedBlob := withBearer(token, blobMux)
 
+	// R0.19: /items/<id>/blob is the one-shot download path for external
+	// callers that hold only an item id. Same Bearer middleware.
+	itemMux := http.NewServeMux()
+	registerItemBlobRoute(itemMux, svc, root, defaultCaller)
+	authedItem := withBearer(token, itemMux)
+
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", authedMCP)
 	mux.Handle("/mcp/", authedMCP) // trailing-slash variant some clients send
 	mux.Handle("/blob/", authedBlob)
+	mux.Handle("/items/", authedItem)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -58,7 +71,7 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, stderr io.Writer)
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stderr, "box-mcp listening on %s (Streamable-HTTP /mcp + /blob/* ; Bearer required; blob root %s)\n", cfg.httpAddr, root)
+		fmt.Fprintf(stderr, "box-mcp listening on %s (Streamable-HTTP /mcp + /blob/* + /items/<id>/blob ; Bearer required; blob root %s)\n", cfg.httpAddr, root)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

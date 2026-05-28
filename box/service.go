@@ -1935,6 +1935,14 @@ func (s *Service) allBoxIDs(ctx context.Context) ([]string, error) {
 	return nil, nil
 }
 
+// AllBoxIDs is the exported form of allBoxIDs, intended for admin tools
+// outside the box package (e.g. cmd/box-mcp's blob GC) that need a global
+// pass. Stores that don't expose the underlying enumerator return nil
+// without an error — same v0.1 caveat as ScanOrphanTasks.
+func (s *Service) AllBoxIDs(ctx context.Context) ([]string, error) {
+	return s.allBoxIDs(ctx)
+}
+
 // boxEnumerator is an optional capability some Store implementations honour
 // so ScanOrphanTasks can enumerate every box without adding a method to the
 // public Store interface (which would force a v2 store contract).

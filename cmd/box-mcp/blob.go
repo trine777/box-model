@@ -21,6 +21,7 @@ package main
 // bytes).
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -29,6 +30,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/windborneos/box-model/box"
 )
 
 // blobRoot resolves the on-disk root for blob storage. Order:
@@ -75,6 +78,81 @@ func isHexSha256(s string) bool {
 		}
 	}
 	return true
+}
+
+// registerItemBlobRoute mounts `GET /items/<item_id>/blob` on the supplied
+// mux. It looks up the item via Service, parses storage_uri = "blob://
+// sha256/<sha>", and streams the on-disk blob back. This collapses the
+// remote-download flow from two RPCs (box_show then GET /blob/<sha>) into
+// a single HTTP call — useful for external machines that hold only an
+// item id.
+//
+// Failure modes:
+//   - item not found        → 404
+//   - item.StorageURI not blob:// → 422 (item exists but it isn't blob-backed)
+//   - blob file missing     → 502 (data integrity issue; surface, don't hide)
+//
+// Bearer middleware is applied outside via the parent mux.
+func registerItemBlobRoute(mux *http.ServeMux, svc *box.Service, root, defaultCaller string) {
+	mux.HandleFunc("/items/", func(w http.ResponseWriter, r *http.Request) {
+		// Path must look like /items/<id>/blob.
+		rest := strings.TrimPrefix(r.URL.Path, "/items/")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) != 2 || parts[1] != "blob" {
+			http.Error(w, "expected /items/<id>/blob", http.StatusBadRequest)
+			return
+		}
+		itemID := parts[0]
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+		default:
+			http.Error(w, "GET or HEAD only", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx := context.Background()
+		item, err := svc.GetItem(ctx, defaultCaller, itemID)
+		if err != nil {
+			// Conservative mapping: any svc error → 404. We could refine
+			// (forbidden vs not found) but for byte download the practical
+			// answer is the same.
+			http.Error(w, "item: "+err.Error(), http.StatusNotFound)
+			return
+		}
+		sha, ok := extractBlobSha(item.StorageURI)
+		if !ok {
+			http.Error(w, "item.storage_uri is not blob://sha256/...; got "+item.StorageURI, http.StatusUnprocessableEntity)
+			return
+		}
+		p := blobPath(root, sha)
+		f, err := os.Open(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Item claims a blob but the blob is missing — bad state.
+				// Run box_gc_blobs to see the broader picture.
+				http.Error(w, "blob missing for item "+itemID+" (sha "+sha+"); run box_gc_blobs to audit", http.StatusBadGateway)
+				return
+			}
+			http.Error(w, "open blob: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			http.Error(w, "stat blob: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Surface item metadata as headers so clients can pick a sensible
+		// filename without a second round-trip.
+		w.Header().Set("ETag", `"`+sha+`"`)
+		w.Header().Set("X-Box-Item-ID", item.ID)
+		w.Header().Set("X-Box-Sha256", sha)
+		if item.Format != "" {
+			w.Header().Set("X-Box-Format", item.Format)
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+		http.ServeContent(w, r, sha, info.ModTime(), f)
+	})
 }
 
 // blobHandlers registers /blob/upload, /blob/<sha>, /blob/ (404 catchall) on

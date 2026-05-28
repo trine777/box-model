@@ -123,6 +123,7 @@ func TestMCPListTools(t *testing.T) {
 		"box_manual":            true,
 		"box_legend_all":        true,
 		"box_overview":          true,
+		"box_gc_blobs":          true,
 	}
 	got := map[string]bool{}
 	for _, tool := range res.Tools {

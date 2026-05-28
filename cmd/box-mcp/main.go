@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -88,7 +89,11 @@ func run(ctx context.Context, cfg config, stdin io.Reader, stdout, stderr io.Wri
 	}
 	srv := buildServer(svc, cfg)
 	if cfg.httpAddr != "" {
-		return runHTTP(ctx, cfg, srv, stderr)
+		caller := cfg.owner
+		if caller == "" {
+			caller = os.Getenv("BOX_CALLER")
+		}
+		return runHTTP(ctx, cfg, srv, svc, caller, stderr)
 	}
 	transport := &mcp.IOTransport{
 		Reader: io.NopCloser(stdin),
@@ -147,8 +152,9 @@ func resolveRoot(boxHome string) (string, error) {
 // handlers is the live state shared by every tool handler — the Service plus
 // the resolved default caller id (computed once at server start).
 type handlers struct {
-	svc    *box.Service
-	caller string // may be ""
+	svc     *box.Service
+	caller  string // may be ""
+	boxHome string // resolved storage root (for blob GC and download routes)
 }
 
 // buildServer constructs an MCP server with every exposed Box tool registered.
@@ -169,7 +175,8 @@ func buildServer(svc *box.Service, cfg config) *mcp.Server {
 	if caller == "" {
 		caller = os.Getenv("BOX_CALLER")
 	}
-	h := &handlers{svc: svc, caller: caller}
+	root, _ := resolveRoot(cfg.boxHome)
+	h := &handlers{svc: svc, caller: caller, boxHome: root}
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "box-mcp",
 		Version: "0.10.0",
@@ -232,6 +239,8 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_task_finish", Description: "Close a YiCheng session with a ✓ task_finish event."}, h.handleTaskFinish)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_task_abort", Description: "Close a YiCheng session with a ✗ task_abort event (no rollback)."}, h.handleTaskAbort)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_task_token_status", Description: "Pure read: report whether a session token is still live."}, h.handleTaskTokenStatus)
+	// R0.19 blob consistency — orphan sweep + missing-ref alert.
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_gc_blobs", Description: "Scan items vs disk blobs; report orphans + missing refs; dry_run defaults true."}, h.handleGCBlobs)
 	// R4.1 self-describing tools — for fresh agents discovering box-mcp.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_manual", Description: "Return the box-mcp traffic manual (markdown): symbols, 程辙 flow, all tools and example calls."}, h.handleManual)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_legend_all", Description: "Return all 25 native symbol legend entries (kind/status/relation/priority) in one call."}, h.handleLegendAll)
@@ -891,6 +900,39 @@ func (h *handlers) handleTaskTokenStatus(ctx context.Context, _ *mcp.CallToolReq
 		out.Session = &s
 	}
 	return nil, out, nil
+}
+
+// ----- R0.19 blob GC -------------------------------------------------------
+
+type gcBlobsInput struct {
+	DryRun         *bool `json:"dry_run,omitempty" jsonschema:"if true (default), report only — do not delete"`
+	OlderThanSec   int   `json:"older_than_seconds,omitempty" jsonschema:"orphans newer than this are spared (default 86400)"`
+}
+
+// handleGCBlobs runs one GC pass over the blob root configured for this
+// server. Defaults are conservative (dry_run=true, older=24h) so an
+// accidental call without args never deletes anything.
+func (h *handlers) handleGCBlobs(ctx context.Context, _ *mcp.CallToolRequest, in gcBlobsInput) (*mcp.CallToolResult, any, error) {
+	dry := true
+	if in.DryRun != nil {
+		dry = *in.DryRun
+	}
+	older := 24 * 3600
+	if in.OlderThanSec > 0 {
+		older = in.OlderThanSec
+	}
+	root, err := blobRoot(h.boxHome)
+	if err != nil {
+		return nil, nil, err
+	}
+	rep, err := runBlobGC(ctx, h.svc, root, gcOptions{
+		DryRun:    dry,
+		OlderThan: time.Duration(older) * time.Second,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, rep, nil
 }
 
 // handleOverview wires box_overview to Service.Overview. The handler does not
