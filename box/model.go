@@ -465,13 +465,16 @@ type OverviewGroup struct {
 // #3). Glyph is the visual literal ("◐" active, "◼" sealed, etc.); Status is
 // the parallel string field; both are populated.
 type BoxGlyph struct {
-	Glyph     string    `json:"glyph"`
-	Key       string    `json:"key"`
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	Items     int       `json:"items"`
-	LabelsTop []string  `json:"labels_top,omitempty"`
-	Latest    time.Time `json:"latest,omitempty"`
+	Glyph     string     `json:"glyph"`
+	Key       string     `json:"key"`
+	ID        string     `json:"id"`
+	Status    string     `json:"status"`
+	Items     int        `json:"items"`
+	LabelsTop []string   `json:"labels_top,omitempty"`
+	// Latest is a *time.Time so an empty box (no items stored yet) marshals
+	// as `null` instead of Go's zero "0001-01-01T00:00:00Z". H1 from R6
+	// dogfood: subagent flagged the zero-value leak as readability noise.
+	Latest *time.Time `json:"latest,omitempty"`
 }
 
 func DefaultPolicy() StoragePolicy {

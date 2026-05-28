@@ -1100,7 +1100,8 @@ func (s *Service) glyphOf(ctx context.Context, b Box) BoxGlyph {
 		if len(items) > 0 {
 			// Browse returns latest-StoredAt-first (see MemoryStore.Browse),
 			// so items[0] carries the freshest timestamp.
-			g.Latest = items[0].StoredAt
+			latest := items[0].StoredAt
+			g.Latest = &latest
 		}
 	}
 	return g
