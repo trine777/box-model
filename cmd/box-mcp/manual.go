@@ -367,7 +367,9 @@ disk only; ` + "`box_gc_blobs`" + ` reclaims them after 24 h. Concretely:
 
 ` + "```json" + `
 // 1. create box
-{"tool":"box_create_box","args":{"key":"my-km","owner_type":"user","owner_id":"alice"}}
+// owner_id MUST equal your caller identity (the one bound to your Bearer
+// token; see "Auth: two layers" above). Substitute it before pasting.
+{"tool":"box_create_box","args":{"key":"my-km","owner_type":"user","owner_id":"<your-caller-id>"}}
 
 // 2. 启程 a task
 {"tool":"box_task_start","args":{
