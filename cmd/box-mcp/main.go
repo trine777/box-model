@@ -83,7 +83,7 @@ func parseFlags(args []string) (config, error) {
 // or Streamable-HTTP (when --http or $PORT is set). Split out from main for
 // testability.
 func run(ctx context.Context, cfg config, stdin io.Reader, stdout, stderr io.Writer) error {
-	svc, _, err := buildService(ctx, cfg, stderr)
+	svc, observer, err := buildService(ctx, cfg, stderr)
 	if err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func run(ctx context.Context, cfg config, stdin io.Reader, stdout, stderr io.Wri
 		if caller == "" {
 			caller = os.Getenv("BOX_CALLER")
 		}
-		return runHTTP(ctx, cfg, srv, svc, caller, stderr)
+		return runHTTP(ctx, cfg, srv, svc, observer, caller, stderr)
 	}
 	transport := &mcp.IOTransport{
 		Reader: io.NopCloser(stdin),

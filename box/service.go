@@ -290,7 +290,7 @@ func (s *Service) SealBox(ctx context.Context, callerID, boxID string) error {
 			return err
 		}
 		if b.OwnerID != callerID {
-			return ErrForbidden
+			return forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		return s.store.SealBox(ctx, boxID)
 	}()
@@ -329,7 +329,7 @@ func (s *Service) Store(ctx context.Context, callerID, boxID string, req StoreRe
 			return Item{}, ErrConflict
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		if req.Kind == "" {
 			return Item{}, fmt.Errorf("%w: kind is required", ErrValidation)
@@ -547,7 +547,7 @@ func (s *Service) ReplaceItem(ctx context.Context, callerID, prevItemID string, 
 			return Item{}, ErrConflict
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		kind := req.Kind
 		if kind == "" {
@@ -667,7 +667,7 @@ func (s *Service) UpdateLabels(ctx context.Context, callerID, itemID string, lab
 			return Item{}, err
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		if !item.IsLatest && !o.allowHistory {
 			return Item{}, fmt.Errorf("%w: cannot patch labels on non-latest revision; use WithAllowHistory if intentional", ErrConflict)
@@ -719,7 +719,7 @@ func (s *Service) MergeLabels(ctx context.Context, callerID, itemID string, patc
 			return Item{}, err
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		if !item.IsLatest && !o.allowHistory {
 			return Item{}, fmt.Errorf("%w: cannot patch labels on non-latest revision; use WithAllowHistory if intentional", ErrConflict)
@@ -774,7 +774,7 @@ func (s *Service) RemoveLabels(ctx context.Context, callerID, itemID string, key
 			return Item{}, err
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		if !item.IsLatest && !o.allowHistory {
 			return Item{}, fmt.Errorf("%w: cannot patch labels on non-latest revision; use WithAllowHistory if intentional", ErrConflict)
@@ -823,7 +823,7 @@ func (s *Service) ListConsumes(ctx context.Context, callerID, itemID string) ([]
 			return nil, err
 		}
 		if b.OwnerID != callerID {
-			return nil, ErrForbidden
+			return nil, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		return s.store.ListConsumes(ctx, itemID)
 	}()
@@ -902,7 +902,7 @@ func (s *Service) DeleteItem(ctx context.Context, callerID, itemID string, write
 			return Item{}, err
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		return s.store.DeleteItem(ctx, itemID)
 	}()
@@ -1365,7 +1365,7 @@ func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req Cr
 			return Item{}, ErrConflict
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		count, err := s.store.CountItems(ctx, boxID)
 		if err != nil {
@@ -1462,7 +1462,7 @@ func (s *Service) SetItemSymbols(ctx context.Context, callerID, itemID string, s
 			return Item{}, err
 		}
 		if b.OwnerID != callerID {
-			return Item{}, ErrForbidden
+			return Item{}, forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		if !item.IsLatest && !o.allowHistory {
 			return Item{}, fmt.Errorf("%w: cannot patch symbols on non-latest revision; use WithAllowHistory if intentional", ErrConflict)
@@ -1509,7 +1509,7 @@ func (s *Service) AppendEvent(ctx context.Context, callerID, itemID string, step
 			return err
 		}
 		if b.OwnerID != callerID {
-			return ErrForbidden
+			return forbiddenCallerMismatch(callerID, b.OwnerID)
 		}
 		if !item.IsLatest {
 			return fmt.Errorf("%w: cannot append event to non-latest revision of item %s", ErrConflict, itemID)
@@ -1941,6 +1941,23 @@ func (s *Service) allBoxIDs(ctx context.Context) ([]string, error) {
 // without an error — same v0.1 caveat as ScanOrphanTasks.
 func (s *Service) AllBoxIDs(ctx context.Context) ([]string, error) {
 	return s.allBoxIDs(ctx)
+}
+
+// forbiddenCallerMismatch wraps ErrForbidden with the caller_id / box.owner_id
+// discrepancy so external agents can see WHY their write was rejected.
+//
+// Failure mode this fixes (R0.23 dogfood F1): a fresh agent calling box_store
+// against a box owned by a different caller used to get the opaque string
+// "forbidden" with no hint that caller-scope was the gate. They'd cycle
+// through allowed_formats / max_content_bytes / token-rotation guesses before
+// figuring it out. With this wrapper the error text reads:
+//
+//	forbidden: caller_owner_mismatch caller="trine" box_owner="fresh-agent"
+//
+// errors.Is(err, ErrForbidden) is preserved (we use %w).
+func forbiddenCallerMismatch(callerID, boxOwnerID string) error {
+	return fmt.Errorf("%w: caller_owner_mismatch caller=%q box_owner=%q",
+		ErrForbidden, callerID, boxOwnerID)
 }
 
 // ObservabilitySnapshot returns a wire-friendly summary of in-memory

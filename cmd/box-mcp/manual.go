@@ -44,7 +44,7 @@ joins, no transactions, no cursors, no roles**. There is:
 | ` + "`UPDATE`" + ` | ` + "`box_replace_item`" + ` (new revision) or ` + "`box_set_item_symbols`" + ` (overwrite 觉痕) | Replace opens a new revision; the old one is kept. Status flip mutates in place. |
 | Primary key | ` + "`item_id`" + ` (server-issued) + ` + "`idem_key`" + ` (caller-issued) | Idempotency at the protocol level, no upsert. |
 | Schema migration | None. ` + "`symbols`" + ` are open-set; ` + "`labels`" + ` are free-form. | Drop in new symbol kinds without DDL. |
-| ACL / GRANT | **There is none.** Bearer token = full access to the tenant. | Single-tenant by design (see capability matrix below). |
+| ACL / GRANT | Two-layer: (1) Bearer token gates HTTP + MCP entry. (2) On WRITES, ` + "`caller_id`" + ` must equal ` + "`box.owner_id`" + ` — see the auth section below for the exact rule. Reads are not caller-scoped. | Single-tenant + one hidden write gate. See "Auth: two layers" below. |
 | Full-text search | **Not built in.** ` + "`box_browse`" + ` does exact-label match only. | Roadmap R2.1/R2.2; today, do retrieval in your agent before calling Box. |
 
 ## Common anti-patterns (do not do these)
@@ -90,6 +90,41 @@ joins, no transactions, no cursors, no roles**. There is:
 - **#12 Box is 符径 (Symbol Path), not a database.** Append-only path
   ledger. 觉痕 (awareness markers: ✓ / ✗ / ? / → / ~ / ◯) can be overwritten
   by subsequent events.
+
+## Auth: two layers (do not skip this)
+
+box-mcp has **two** authorization layers; missing the second is the
+single most common stumble for fresh agents.
+
+### Layer 1 — Bearer token
+
+Every HTTP request needs ` + "`Authorization: Bearer <BOX_API_TOKEN>`" + `. No token
+→ ` + "`401 Unauthorized`" + `. Wrong token → also ` + "`401`" + ` (constant-time compare).
+
+### Layer 2 — caller / owner gate (writes only)
+
+When you ` + "`box_create_box`" + ` you set ` + "`owner_id`" + ` (any string you want).
+On every WRITE to that box — store / replace / labels / delete / consume /
+set_item_symbols / append_event — the server checks
+` + "`caller_id == box.owner_id`" + `. If they differ you get:
+
+` + "```" + `
+forbidden: caller_owner_mismatch caller="<your-caller>" box_owner="<the-box-owner>"
+` + "```" + `
+
+` + "`caller_id`" + ` is the server-side default from ` + "`--owner`" + ` flag or
+` + "`$BOX_CALLER`" + ` env (see ` + "`cmd/box-mcp/main.go:resolveCaller`" + `). For a remote
+deployment it is whatever the operator configured at startup. You cannot
+choose it per-request and there is **no whoami endpoint** (R0.23 noted; F2
+deferred).
+
+### Practical rule
+
+When you create a new box, set ` + "`owner_id`" + ` to the deploying caller's id
+(typically ` + "`trine`" + ` on this deployment). Reads on any box work
+regardless. If a write returns ` + "`forbidden: caller_owner_mismatch`" + ` and you
+own the deployment, the cheapest fix is recreate-or-replace the box with
+the matching ` + "`owner_id`" + ` — not rotate the token.
 
 ## Native symbols (25)
 
