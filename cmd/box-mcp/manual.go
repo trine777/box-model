@@ -106,7 +106,7 @@ sheet:
 - **scope / topic / domain**: free-form (` + "`[A-Za-z0-9_-]+`" + `,
   ` + "`nf:<ns>`" + ` for domain)
 
-## The 27 tools
+## The 28 tools (plus HTTP-only routes — see "Uploading & downloading files" below)
 
 ### Box / Item CRUD (18)
 - ` + "`box_create_box`" + ` — create a box (key, owner_type, owner_id)
@@ -150,6 +150,83 @@ box_set_item_symbols.
 ### Self-describing (2)
 - ` + "`box_manual`" + ` — this document
 - ` + "`box_legend_all`" + ` — all 25 native symbols at once
+
+### Blob consistency audit (R0.19) (1)
+- ` + "`box_gc_blobs`" + ` — scan items vs disk blobs; report orphans
+  (delete-candidates) and missing refs (alerts). Default ` + "`dry_run=true`" + `;
+  pass ` + "`{\"dry_run\":false}`" + ` to actually delete orphan blobs older
+  than 24 h.
+
+## Uploading & downloading files (R0.18 + R0.19)
+
+Bytes do NOT go through MCP tools. Item content over JSON-RPC is base64 +
+33% overhead + whole-file in one message — fine for small markdown, awful
+for binaries. Instead box-mcp mounts **plain HTTP routes** alongside the
+MCP transport. **These routes only exist in HTTP mode** (` + "`--http=:8080`" + `
+or ` + "`$PORT`" + `); stdio-only deployments cannot upload/download bytes.
+
+### Routes (all Bearer-protected)
+
+| Route | Use |
+| --- | --- |
+| ` + "`POST /blob/upload`" + ` | Stream raw bytes in the request body. Server hashes (sha256), stores, returns ` + "`{sha256, size, deduped, storage_uri}`" + `. Idempotent: same bytes → same sha → ` + "`deduped:true`" + ` on retry. |
+| ` + "`GET /blob/<sha256>`" + ` | Stream blob bytes back. Supports HTTP Range (resume safe) and ETag. |
+| ` + "`HEAD /blob/<sha256>`" + ` | Exists check; cheap pre-flight before re-upload. |
+| ` + "`GET /items/<item_id>/blob`" + ` | **Gold-path download.** Server resolves the item → parses ` + "`storage_uri`" + ` → streams the blob. Use this when an external machine holds only an item id. Returns ` + "`ETag`" + `, ` + "`X-Box-Sha256`" + `, ` + "`X-Box-Format`" + `, ` + "`X-Box-Item-ID`" + ` headers. |
+| ` + "`GET /healthz`" + ` | No auth; 200 ok. For tunnel / loadbalancer probes. |
+
+### Canonical upload flow
+
+` + "```bash" + `
+# 1. Upload bytes → get sha
+RESP=$(curl -sS -X POST "$URL/blob/upload" \
+  -H "Authorization: Bearer $TOKEN" --data-binary @local-file.pdf)
+SHA=$(echo "$RESP" | jq -r .sha256)
+
+# 2. Register the item (metadata only; bytes already on the server)
+# Pre-req: box's storage_policy allows the format AND max_content_bytes
+# does not block (inline content here is just JSON metadata, not the bytes).
+curl -sS -X POST "$URL/mcp" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"box_store","arguments":{
+        "box_id":"<box-id>",
+        "kind":"A",
+        "source_type":"upload",
+        "storage_uri":"blob://sha256/'"$SHA"'",
+        "format":"binary",
+        "idem_key":"upload::local-file.pdf",
+        "content":{"name":"local-file.pdf","mime":"application/pdf"},
+        "symbols":[{"kind":"kind","value":"A"}]
+      }}}'
+# → captures item_id from response
+` + "```" + `
+
+### Canonical download flow (any machine with the item_id)
+
+` + "```bash" + `
+curl -sS "$URL/items/<item_id>/blob" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o downloaded-file
+# Headers include ETag = sha256 — verify with shasum -a 256 if paranoid.
+# Range supported: -H "Range: bytes=0-1023" for partial.
+` + "```" + `
+
+### Atomicity & retry semantics
+
+The upload and ` + "`box_store`" + ` are **two writes, not a transaction**. But the
+flow is **one-way safe**: sha is only returned AFTER the blob is on disk, so
+items cannot reference missing blobs (no dangling pointer is reachable
+through the normal flow). The only failure mode is *orphan blob* — bytes
+written, ` + "`box_store`" + ` didn't follow (network blip, crash). These cost
+disk only; ` + "`box_gc_blobs`" + ` reclaims them after 24 h. Concretely:
+
+- **Client retry policy**: blob_put is idempotent via sha (content-addressed);
+  box_store is idempotent via ` + "`idem_key`" + `. Retry both freely.
+- **Server invariants**: ` + "`/items/<id>/blob`" + ` returns ` + "`502`" + ` if the item
+  references a sha not on disk — alert the operator and run ` + "`box_gc_blobs`" + `
+  (the report's ` + "`missing[]`" + ` field lists every broken ref).
 
 ## Minimal happy path (copy/paste-able)
 
@@ -247,7 +324,7 @@ func (h *handlers) handleManual(ctx context.Context, _ *mcp.CallToolRequest, _ s
 	return nil, manualOutput{
 		Format:  "markdown",
 		Content: manualMarkdown,
-		Version: "0.13.2",
+		Version: "0.19.0",
 	}, nil
 }
 
