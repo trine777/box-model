@@ -476,6 +476,7 @@ and another with a read-only proxy you build yourself. Roadmap candidate.
 | Upload returns `validation: unsupported storage_uri scheme` | trying to write a scheme other than `row://`, `blob://`, `s3://`, `folder://`, `repo://`, `ipfs://`, `collection://` | Use one of the allowed prefixes; treat custom scheme need as agent-side resolution |
 | Random / fly endpoint TLS errors after idle | Fly auto-stop machine is cold; first request wakes it | warm-up: `curl /healthz` first, then real call |
 | Mac unreachable after a few hours of `--http` mode | Mac slept | wrap the binary with `caffeinate -i`, or use launchd (§6) |
+| `cloudflared tunnel --url ...` URL never resolves locally (`Could not resolve host`) | A local DNS resolver intercepts public lookups. Common causes: Tailscale MagicDNS (`100.100.100.100`), corporate VPN, a local Clash/Surge HTTP proxy on `127.0.0.1:7890`. Confirm with `scutil --dns` (look for non-public nameserver) and `networksetup -getwebproxy "Wi-Fi"`. | **Skip Cloudflare Tunnel, use Tailscale directly.** Your Mac already has a Tailscale IP (`tailscale ip -4`), reachable from every tailnet device. Same Bearer, no public exposure, zero DNS friction. cloudflared is only needed when you must serve agents that aren't on your tailnet. |
 
 ---
 
