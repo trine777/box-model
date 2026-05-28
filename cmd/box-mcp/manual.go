@@ -255,6 +255,20 @@ box_set_item_symbols.
   pass ` + "`{\"dry_run\":false}`" + ` to actually delete orphan blobs older
   than 24 h.
 
+### Sphere navigation (R6) (2)
+- ` + "`box_set_box_labels`" + ` — write Labels on a Box (` + "`mode=merge`" + ` default;
+  ` + "`replace`" + ` overwrites). Empty value deletes the key. Caller==owner gate.
+- ` + "`box_globes`" + ` — multi-globe view: groups caller-owned boxes by
+  ` + "`Labels[\"__op:sphere\"]`" + ` (override via ` + "`sphere_label`" + ` arg).
+  Returns per-sphere BoxGlyph list + ItemCount + CountsByKind aggregate;
+  unassigned bucket holds boxes with no sphere label. Sorted alphabetically.
+
+The "sphere" is a convention — a logical grouping of boxes (department,
+project area, personal vs work, …). Set it on creation via
+` + "`box_create_box {labels: {\"__op:sphere\": \"engineering\"}}`" + ` or
+retroactively via ` + "`box_set_box_labels`" + `. Drill into one sphere via
+` + "`box_overview {axis:\"...\", filter:{labels:{\"__op:sphere\":\"engineering\"}}}`" + `.
+
 ## Uploading & downloading files (R0.18 + R0.19)
 
 Bytes do NOT go through MCP tools. Item content over JSON-RPC is base64 +
