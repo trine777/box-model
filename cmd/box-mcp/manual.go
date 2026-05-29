@@ -19,6 +19,25 @@ const manualMarkdown = `# box-mcp 交通手册 (Traffic Manual)
 > contact assume box-mcp is a database with extra ceremony. It is not.
 > Using it that way will produce confused queries and frustrated retries.
 
+## Fastest path: the one-line wrappers (R11)
+
+Before hand-rolling the SSE handshake below, know that three shell
+wrappers ship in ` + "`scripts/`" + ` (install to your PATH) that collapse all
+of it to one line each. On the tailnet they need **no token**:
+
+` + "```bash" + `
+boxcall box_globes                      # any MCP tool, one line
+boxcall box_show '{"item_id":"item_…"}' # tool + JSON args
+boxput ./report.pdf media-archive       # upload bytes + register item → prints item_id
+boxget item_… ./out.pdf                 # download an item's file
+` + "```" + `
+
+Env: ` + "`BOX_ENDPOINT`" + ` (default ` + "`http://100.83.33.126:7777`" + ` — the tailnet
+host), ` + "`BOX_TOKEN`" + ` (only needed for the public Fly endpoint). These
+wrappers handle initialize / Mcp-Session-Id / notifications/initialized /
+SSE parsing for you. Hand-roll the protocol below only if you can't use
+the wrappers.
+
 ## Streamable-HTTP MCP transport quickstart (read first if you're not Claude)
 
 If you reached this server over HTTP (` + "`/mcp`" + ` endpoint), the wire format is

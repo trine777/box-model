@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxcall <tool> [json_args] — one-line MCP tool call. Handles the whole
+SSE handshake. Tailnet = zero token. Env: BOX_ENDPOINT (default tailnet),
+BOX_TOKEN (only for public/Fly)."""
+import sys, json, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # ignore local proxy
+def _mcp(method, params, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if not notify: body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK: h["Authorization"] = "Bearer " + TOK
+    if sid: h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=30) as r:
+        ns = r.headers.get("Mcp-Session-Id"); raw = r.read().decode()
+    if notify: return None, ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+def main():
+    if len(sys.argv) < 2:
+        print("usage: boxcall <tool> [json_args]   e.g. boxcall box_globes", file=sys.stderr); sys.exit(2)
+    tool = sys.argv[1]
+    args = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxcall", "version": "1.0"}})
+    _mcp("notifications/initialized", {}, sid, notify=True)
+    r, _ = _mcp("tools/call", {"name": tool, "arguments": args}, sid)
+    res = r.get("result", {})
+    txt = res.get("content", [{}])[0].get("text", "")
+    if res.get("isError"):
+        print("ERROR: " + txt, file=sys.stderr); sys.exit(1)
+    try: print(json.dumps(json.loads(txt), ensure_ascii=False, indent=2))
+    except Exception: print(txt)
+main()

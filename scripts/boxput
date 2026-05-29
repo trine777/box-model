@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxput <file> <box_key> [name] — upload bytes to blob layer, register an
+item pointing at it. Prints the new item_id."""
+import sys, json, os, urllib.request, mimetypes
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _hdr(extra=None):
+    h = {"Accept": "application/json, text/event-stream"}
+    if TOK: h["Authorization"] = "Bearer " + TOK
+    if extra: h.update(extra)
+    return h
+def _mcp(method, params, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if not notify: body["id"] = 1
+    h = _hdr({"Content-Type": "application/json"})
+    if sid: h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=60) as r:
+        ns = r.headers.get("Mcp-Session-Id"); raw = r.read().decode()
+    if notify: return None, ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+def _tool(sid, n, a):
+    r, _ = _mcp("tools/call", {"name": n, "arguments": a}, sid); res = r.get("result", {})
+    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+    return json.loads(res["content"][0]["text"])
+def main():
+    if len(sys.argv) < 3:
+        print("usage: boxput <file> <box_key> [name]", file=sys.stderr); sys.exit(2)
+    path, key = sys.argv[1], sys.argv[2]
+    name = sys.argv[3] if len(sys.argv) > 3 else os.path.basename(path)
+    data = open(path, "rb").read()
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    # 1. upload bytes
+    req = urllib.request.Request(EP + "/blob/upload", data=data, headers=_hdr(), method="POST")
+    with _op.open(req, timeout=120) as r:
+        blob = json.loads(r.read().decode())
+    sha = blob["sha256"]
+    # 2. register item
+    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxput", "version": "1.0"}})
+    _mcp("notifications/initialized", {}, sid, notify=True)
+    b = _tool(sid, "box_get_box_by_key", {"key": key})
+    item = _tool(sid, "box_store", {"box_id": b["id"], "kind": "A", "source_type": "upload",
+        "storage_uri": "blob://sha256/" + sha, "format": "binary",
+        "idem_key": "put-" + sha[:12], "content": {"name": name, "mime": mime, "size": len(data)},
+        "symbols": [{"kind": "kind", "value": "A"}]})
+    print(f"{item['id']}  ({len(data)} bytes, blob://sha256/{sha[:12]}…, mime={mime})")
+main()

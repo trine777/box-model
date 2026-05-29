@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxget <item_id> [out_file] — download an item's blob bytes. Default out
+= the item's stored name (or item_id)."""
+import sys, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def main():
+    if len(sys.argv) < 2:
+        print("usage: boxget <item_id> [out_file]", file=sys.stderr); sys.exit(2)
+    iid = sys.argv[1]
+    h = {}
+    if TOK: h["Authorization"] = "Bearer " + TOK
+    req = urllib.request.Request(EP + "/items/" + iid + "/blob", headers=h)
+    try:
+        with _op.open(req, timeout=120) as r:
+            data = r.read(); name = r.headers.get("X-Box-Item-Id", iid)
+    except urllib.error.HTTPError as e:
+        print(f"ERROR {e.code}: {e.read().decode()[:120]}", file=sys.stderr); sys.exit(1)
+    out = sys.argv[2] if len(sys.argv) > 2 else iid + ".bin"
+    open(out, "wb").write(data)
+    print(f"{out}  ({len(data)} bytes)")
+main()

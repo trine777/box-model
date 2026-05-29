@@ -281,6 +281,35 @@ bytes through `/blob/upload` and only the pointer (`storage_uri =
 
 ---
 
+## 4.4 · One-line wrappers (R11 — lowest operation cost)
+
+Three scripts in `scripts/` remove the per-call MCP-SSE boilerplate. Install
+once:
+
+```bash
+cp scripts/boxcall scripts/boxput scripts/boxget ~/.local/bin/ && chmod +x ~/.local/bin/box{call,put,get}
+```
+
+| Command | Does | Token? |
+| --- | --- | --- |
+| `boxcall <tool> [json]` | Any MCP tool in one line (handles init/session/SSE) | tailnet: none |
+| `boxput <file> <box_key> [name]` | Upload bytes → `/blob/upload` → register item → prints item_id | tailnet: none |
+| `boxget <item_id> [out]` | Download an item's blob bytes | tailnet: none |
+
+Env: `BOX_ENDPOINT` (default `http://100.83.33.126:7777`, the tailnet host),
+`BOX_TOKEN` (only for the public Fly endpoint). Each wrapper ignores the
+local HTTP proxy (`ProxyHandler({})`), so they work even with Clash/Surge
+running.
+
+Examples:
+```bash
+boxcall box_globes                        # multi-sphere overview
+boxcall box_show '{"item_id":"item_…"}'   # read an item
+boxput ~/report.pdf media-archive         # → item_abc… (68 bytes, blob://…)
+boxget item_abc… ~/Downloads/report.pdf   # fetch it back
+BOX_ENDPOINT=https://box-mcp-trine.fly.dev BOX_TOKEN=$(cat ~/.box-fly-token) boxcall box_globes  # against Fly
+```
+
 ## 4.5 · Disaster-recovery sync (Mac primary → Fly replica)
 
 The recommended topology for a tailnet fleet:
