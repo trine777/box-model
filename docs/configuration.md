@@ -298,6 +298,7 @@ cp scripts/boxcall scripts/boxput scripts/boxget ~/.local/bin/ && chmod +x ~/.lo
 | `boxget <item_id> [out]` | Download an item's blob bytes | tailnet: none |
 | `boxstat [name_prefix]` | Precise usage metrics: calls / errors / err% / avg latency per operation | tailnet: none |
 | `boxstate [--raw]` | **觉痕 portrait** — fuzzy, symbolic, glanceable current-state (not precise numbers). Reuses box's own symbols: activity `***/**/*/·`, health `✓/~/✗/◯`. For iteration decisions, not monitoring. `--raw` = exact numbers. | tailnet: none |
+| `boxlife` | **活化画像** — agent 上报视作系统代谢;maps each op to a fengyin five-element mind (风感知/火判断/土成形/水连接/空抽象) and shows the relative pulse (盛/温/微/静). Answers "which mind is the system living through right now". | tailnet: none |
 
 Orient with `boxcall box_globes` (zero args, lists every box). Then
 `boxls <key>` to see what's inside. `boxstat` shows which operations are
