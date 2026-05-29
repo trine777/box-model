@@ -281,6 +281,71 @@ bytes through `/blob/upload` and only the pointer (`storage_uri =
 
 ---
 
+## 4.5 · Disaster-recovery sync (Mac primary → Fly replica)
+
+The recommended topology for a tailnet fleet:
+
+```
+日常 (normal):
+  fleet ──tailnet, zero token──> Mac box-mcp  (PRIMARY, source of truth)
+                                      │
+                                      │ every 6 days, one-way incremental
+                                      ▼
+                                 Fly box-mcp  (read-only DR replica, Bearer)
+
+灾难 (Mac offline):
+  fleet ──public + Bearer──> Fly  (serves stale-by-≤6-days data)
+  ※ switch is manual: point clients at the Fly endpoint + token.
+```
+
+- **Primary**: your Mac, reached over Tailscale with no token (§1/§6).
+- **Replica**: Fly, kept current by `scripts/box-sync-to-fly.py` on a
+  launchd timer (`com.box-sync`, `StartInterval=518400` = 6 days).
+- **One-way, add-only (v1)**: Mac is always source of truth. The sync
+  creates missing boxes (mirroring policy + labels) and stores items the
+  replica lacks (diffed by `idem_key`). It does NOT delete, and does NOT
+  propagate in-place edits to existing items (symbol/label changes on an
+  already-synced item lag until that item gets a new revision). Acceptable
+  for DR; the replica is a superset-or-equal of the primary.
+
+Install the timer:
+
+```bash
+# Fly token in its own file (separate from the local one)
+echo "<BOX_API_TOKEN-of-fly-app>" > ~/.box-fly-token && chmod 600 ~/.box-fly-token
+cp scripts/box-sync-to-fly.py ~/.local/bin/
+
+cat > ~/.local/bin/box-sync-to-fly.sh <<'EOF'
+#!/bin/sh
+export no_proxy='*' NO_PROXY='*'   # bypass any local HTTP proxy
+exec /usr/bin/python3 "$HOME/.local/bin/box-sync-to-fly.py"
+EOF
+chmod +x ~/.local/bin/box-sync-to-fly.sh
+
+cat > ~/Library/LaunchAgents/com.box-sync.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD plist 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>          <string>com.box-sync</string>
+  <key>ProgramArguments</key><array><string>$HOME/.local/bin/box-sync-to-fly.sh</string></array>
+  <key>StartInterval</key>  <integer>518400</integer>
+  <key>RunAtLoad</key>      <false/>
+  <key>StandardOutPath</key><string>/tmp/box-sync.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/box-sync.err.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.box-sync.plist
+```
+
+Run on demand (e.g. before a known Mac downtime): `~/.local/bin/box-sync-to-fly.sh`.
+
+Recovery-point objective: **≤ 6 days** of data loss if the Mac dies between
+syncs. Tighten by lowering `StartInterval` (e.g. `86400` = daily). During a
+recovery, treat Fly as **read-only** — writes there won't sync back to the
+Mac (that's bidirectional, out of scope).
+
 ## 5 · Multi-host considerations
 
 If you run **Mac + Fly simultaneously**, they are two independent stores.
