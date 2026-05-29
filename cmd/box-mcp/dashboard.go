@@ -58,6 +58,7 @@ type snapshot struct {
 		ByStatus       map[string]int `json:"by_status"`
 		CompletionRate float64        `json:"completion_rate"`
 		Stuck          int            `json:"stuck"`
+		DurationsMs    []float64      `json:"durations_ms"`
 	} `json:"tasks"`
 	Perf struct {
 		Ops []struct {
@@ -124,6 +125,52 @@ func collectSnapshots(ctx context.Context, svc *box.Service, caller string) []sn
 	return out
 }
 
+// taskAgg is the SYSTEM-LEVEL task rollup (R15.1). task is a development
+// concept that lives entirely on the business plane (:7777); per-instance task
+// cards on the observation plane (:7788, 0 tasks) were misleading noise, so the
+// task metric is promoted to a single aggregate over ALL instances' latest
+// snapshots. Aggregation rule must stay identical across dashboard.go / boxops
+// / boxboard (obs_v2_spec R15.1):
+//   total          = Σ instance tasks.total
+//   byStatus       = Σ instance tasks.by_status, merged per glyph
+//   completionRate = byStatus["✓"] / total   (0 when total==0)
+//   stuck          = Σ instance tasks.stuck
+//   avgDurationS   = mean of all instances' tasks.durations_ms, in seconds
+type taskAgg struct {
+	Total          int
+	ByStatus       map[string]int
+	CompletionRate float64
+	Stuck          int
+	AvgDurationS   float64
+}
+
+// aggregateTasks rolls every instance's latest task snapshot into one
+// system-level summary.
+func aggregateTasks(snaps []snapshot) taskAgg {
+	agg := taskAgg{ByStatus: map[string]int{}}
+	var durSum float64
+	var durN int
+	for _, s := range snaps {
+		t := s.Tasks
+		agg.Total += t.Total
+		agg.Stuck += t.Stuck
+		for k, v := range t.ByStatus {
+			agg.ByStatus[k] += v
+		}
+		for _, d := range t.DurationsMs {
+			durSum += d
+			durN++
+		}
+	}
+	if agg.Total > 0 {
+		agg.CompletionRate = float64(agg.ByStatus["✓"]) / float64(agg.Total)
+	}
+	if durN > 0 {
+		agg.AvgDurationS = durSum / float64(durN) / 1000.0
+	}
+	return agg
+}
+
 func pct(num, den float64) float64 {
 	if den <= 0 {
 		return 0
@@ -170,6 +217,7 @@ h1{font-size:18px;font-weight:600;color:#9ef;margin:0 0 4px}
 .card{background:#171a21;border:1px solid #232733;border-radius:10px;padding:16px 20px;margin:0 0 16px;max-width:860px}
 .inst{color:#9ef;font-weight:600;margin-bottom:10px;font-size:15px}
 .down{border-color:#5a2730}.down .inst{color:#f88}
+.sys{border-color:#2d3a4a;background:#141b24}.sys .inst{color:#bdf}
 .sect{color:#9bd;font-size:12px;letter-spacing:.5px;margin:14px 0 6px;text-transform:uppercase}
 .kv{display:inline-block;min-width:150px;margin:2px 14px 2px 0}
 .kv b{color:#cde}.dim{color:#778}
@@ -192,6 +240,8 @@ th.l,td.l{text-align:left}td{text-align:right;padding:2px 12px 2px 0}
 		return b.String()
 	}
 
+	renderSystemTasks(&b, aggregateTasks(snaps))
+
 	seen := map[string]bool{}
 	for _, s := range snaps {
 		seen[s.Instance] = true
@@ -205,6 +255,36 @@ th.l,td.l{text-align:left}td{text-align:right;padding:2px 12px 2px 0}
 	}
 	b.WriteString(`</body></html>`)
 	return b.String()
+}
+
+// renderSystemTasks emits the single system-level task summary block at the top
+// of the page (R15.1). task is a development concept aggregated across the whole
+// fleet, not a per-instance metric.
+func renderSystemTasks(b *strings.Builder, a taskAgg) {
+	b.WriteString(`<div class="card sys"><div class="inst">系统 task(全舰队聚合)</div>`)
+	fmt.Fprintf(b, `<span class="kv">total <b>%d</b></span>`, a.Total)
+	fmt.Fprintf(b, `<span class="kv">完整度 <b>%.0f%%</b></span>`, a.CompletionRate*100)
+	stkcls := "ok"
+	if a.Stuck > 0 {
+		stkcls = "bad"
+	}
+	fmt.Fprintf(b, `<span class="kv">卡住 <b class="%s">%d</b></span>`, stkcls, a.Stuck)
+	fmt.Fprintf(b, `<span class="kv">avg duration <b>%.0fs</b></span>`, a.AvgDurationS)
+	if len(a.ByStatus) > 0 {
+		keys := make([]string, 0, len(a.ByStatus))
+		for k := range a.ByStatus {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s:%d", html.EscapeString(k), a.ByStatus[k]))
+		}
+		fmt.Fprintf(b, `<span class="kv">by_status <b>%s</b></span>`, strings.Join(parts, " "))
+	} else {
+		b.WriteString(`<span class="kv dim">by_status —</span>`)
+	}
+	b.WriteString(`</div>`)
 }
 
 func renderInstance(b *strings.Builder, s snapshot) {
@@ -230,30 +310,9 @@ func renderInstance(b *strings.Builder, s snapshot) {
 	fmt.Fprintf(b, `<span class="kv">CPU <b>%.1f%%</b></span>`, c.ProcCPU)
 	fmt.Fprintf(b, `<span class="kv">uptime <b>%s</b></span>`, humanDur(c.ProcUptimeS))
 
-	// --- tasks ---
-	t := s.Tasks
-	b.WriteString(`<div class="sect">task 执行</div>`)
-	fmt.Fprintf(b, `<span class="kv">total <b>%d</b></span>`, t.Total)
-	fmt.Fprintf(b, `<span class="kv">完整度 <b>%.0f%%</b></span>`, t.CompletionRate*100)
-	stkcls := "ok"
-	if t.Stuck > 0 {
-		stkcls = "bad"
-	}
-	fmt.Fprintf(b, `<span class="kv">卡住 <b class="%s">%d</b></span>`, stkcls, t.Stuck)
-	if len(t.ByStatus) > 0 {
-		keys := make([]string, 0, len(t.ByStatus))
-		for k := range t.ByStatus {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, 0, len(keys))
-		for _, k := range keys {
-			parts = append(parts, fmt.Sprintf("%s:%d", html.EscapeString(k), t.ByStatus[k]))
-		}
-		fmt.Fprintf(b, `<span class="kv">by_status <b>%s</b></span>`, strings.Join(parts, " "))
-	} else {
-		b.WriteString(`<span class="kv dim">by_status —</span>`)
-	}
+	// task is NOT rendered per-instance anymore — it is a development concept
+	// aggregated to a single system-level summary at the top of the page
+	// (renderSystemTasks). The instance card keeps 容量 / 性能 / 业务 only.
 
 	// --- perf 性能表 ---
 	b.WriteString(`<div class="sect">性能 perf(请求)</div>`)

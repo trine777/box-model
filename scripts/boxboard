@@ -96,12 +96,29 @@ def fetch_latest(sid):
     return latest
 
 
+def aggregate_tasks(latest):
+    """系统级 task 聚合(R15.1,口径同 dashboard.go / boxops)。"""
+    total = stuck = 0
+    by = {}
+    durs = []
+    for _, snap in latest.values():
+        t = snap.get("tasks", {}) or {}
+        total += t.get("total", 0)
+        stuck += t.get("stuck", 0)
+        for k, v in (t.get("by_status", {}) or {}).items():
+            by[k] = by.get(k, 0) + v
+        durs += (t.get("durations_ms", []) or [])
+    cr = (by.get("✓", 0) / total) if total else 0.0
+    davg = (sum(durs) / len(durs) / 1000.0) if durs else 0.0
+    return total, by, cr, stuck, davg
+
+
 def boards(latest):
     """返回 (terminal_text, markdown)。两者皆纯数字表,无符号。"""
     A = ["box 系统现状 · 数字表 (人面) · 观察平面 %s" % EP, ""]
     ts_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     M = ["# box 系统现状 · 工程数字表", "",
-         "> obs_v2 真实指标快照 · 容量 / task / 性能 / 业务 · 零符号抽象  ",
+         "> obs_v2 真实指标快照 · 容量 / 性能 / 业务 · task 为系统级聚合 · 零符号抽象  ",
          "> 渲染于 %s · 端点 %s" % (ts_now, EP), ""]
 
     if not latest:
@@ -109,12 +126,23 @@ def boards(latest):
         M.append("(obs-metrics 暂无快照 — 先跑 boxsnap)")
         return "\n".join(A), "\n".join(M)
 
+    # 系统级 task 摘要(顶部,全舰队聚合)
+    g_total, g_by, g_cr, g_stuck, g_davg = aggregate_tasks(latest)
+    g_bystr = " ".join("%s%d" % (k, v) for k, v in sorted(g_by.items(), key=lambda kv: -kv[1])) or "-"
+    g_sflag = "  !!stuck=%d" % g_stuck if g_stuck else ""
+    A.append("[系统 task · 全舰队聚合] total %d  完整度 %.0f%%  by_status[%s]  avg %.0fs%s" % (
+        g_total, g_cr * 100, g_bystr, g_davg, g_sflag))
+    A.append("")
+    M.append("## 系统 task(全舰队聚合)")
+    M.append("**task**: total %d · 完整度 %.0f%% · by_status [%s] · avg %.0fs · stuck %d  " % (
+        g_total, g_cr * 100, g_bystr, g_davg, g_stuck))
+    M.append("")
+
     seen = set()
     for inst in sorted(latest, key=lambda i: (i not in EXPECT, i)):
         ta, snap = latest[inst]
         seen.add(inst)
         cap = snap.get("capacity", {})
-        t = snap.get("tasks", {})
         perf = snap.get("perf", {}).get("ops", [])
         biz = snap.get("business", {})
         down = snap.get("down")
@@ -122,13 +150,8 @@ def boards(latest):
 
         du, dt = cap.get("disk_used", 0), cap.get("disk_total", 0)
         dpct = (100.0 * du / dt) if dt else 0.0
-        cr = t.get("completion_rate", 0.0)
-        by = t.get("by_status", {})
-        bystr = " ".join("%s%d" % (k, v) for k, v in sorted(by.items(), key=lambda kv: -kv[1])) or "-"
-        durs = t.get("durations_ms", [])
-        davg = (sum(durs) / len(durs) / 1000.0) if durs else 0
 
-        # --- terminal ---
+        # --- terminal ---  (task 不再 per-instance,见顶部系统级摘要)
         A.append("== %s%s   快照 %s" % (inst, flag, ta))
         if down:
             A.append("   不可达: %s" % snap.get("error", "?"))
@@ -138,9 +161,6 @@ def boards(latest):
                      cap.get("blob_count", 0), cap.get("blob_bytes", 0) / 1048576.0,
                      cap.get("proc_rss_mb", 0), cap.get("proc_cpu", 0),
                      cap.get("proc_uptime_s", 0) / 3600.0))
-        sflag = "  !!stuck=%d" % t.get("stuck", 0) if t.get("stuck") else ""
-        A.append("  task  total %d 完整度 %.0f%% [%s] avg %.0fs%s" % (
-            t.get("total", 0), cr * 100, bystr, davg, sflag))
         A.append("  perf  %-22s %5s %5s %6s %5s %5s" % ("op", "calls", "err", "err%", "avg", "p95"))
         for o in sorted(perf, key=lambda o: (-o.get("err_pct", 0), -o.get("calls", 0)))[:6]:
             ep = o.get("err_pct", 0)
@@ -168,8 +188,6 @@ def boards(latest):
                      cap.get("blob_count", 0), cap.get("blob_bytes", 0) / 1048576.0,
                      cap.get("proc_rss_mb", 0), cap.get("proc_cpu", 0),
                      cap.get("proc_uptime_s", 0) / 3600.0))
-        M.append("**task**: total %d · 完整度 %.0f%% · by_status [%s] · avg %.0fs · stuck %d  " % (
-            t.get("total", 0), cr * 100, bystr, davg, t.get("stuck", 0)))
         M += ["", "性能 (top):", "", "| op | calls | err | err% | avg ms | p95 ms |", "|---|---:|---:|---:|---:|---:|"]
         for o in sorted(perf, key=lambda o: (-o.get("err_pct", 0), -o.get("calls", 0)))[:8]:
             avg, p95 = o.get("avg_ms"), o.get("p95_ms")

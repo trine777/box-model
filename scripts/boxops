@@ -74,9 +74,35 @@ def human_age(latest):
         return latest[:10]
 
 
+def aggregate_tasks(latest):
+    """系统级 task 聚合(R15.1,口径同 dashboard.go / boxboard)。
+    遍历所有实例最新快照的 tasks: total / by_status(按 glyph 合并)/ stuck /
+    durations_ms 合并求均;completion_rate = ✓ 总数 / total(total=0 -> 0)。"""
+    total = stuck = 0
+    by = {}
+    durs = []
+    for _, snap in latest.values():
+        t = snap.get("tasks", {}) or {}
+        total += t.get("total", 0)
+        stuck += t.get("stuck", 0)
+        for k, v in (t.get("by_status", {}) or {}).items():
+            by[k] = by.get(k, 0) + v
+        durs += (t.get("durations_ms", []) or [])
+    cr = (by.get("✓", 0) / total) if total else 0.0
+    davg = (sum(durs) / len(durs) / 1000.0) if durs else 0.0
+    return total, by, cr, stuck, davg
+
+
+def render_system_tasks(latest):
+    total, by, cr, stuck, davg = aggregate_tasks(latest)
+    bystr = " ".join("%s%d" % (k, v) for k, v in sorted(by.items(), key=lambda kv: -kv[1])) or "-"
+    sflag = "  !! stuck=%d" % stuck if stuck else ""
+    return ("[系统 task · 全舰队聚合] total %d  完整度 %4.0f%%  by_status[%s]  avg_dur %.0fs%s" % (
+        total, cr * 100, bystr, davg, sflag))
+
+
 def render(snap):
     cap = snap.get("capacity", {})
-    t = snap.get("tasks", {})
     perf = snap.get("perf", {}).get("ops", [])
     biz = snap.get("business", {})
     out = []
@@ -91,17 +117,7 @@ def render(snap):
                    cap.get("proc_rss_mb", 0), cap.get("proc_cpu", 0),
                    cap.get("proc_uptime_s", 0) / 3600.0, cap.get("proc_count", 0)))
 
-    # --- tasks ---
-    total = t.get("total", 0)
-    cr = t.get("completion_rate", 0.0)
-    by = t.get("by_status", {})
-    bystr = " ".join("%s%d" % (k, v) for k, v in sorted(by.items(), key=lambda kv: -kv[1])) or "-"
-    durs = t.get("durations_ms", [])
-    davg = (sum(durs) / len(durs) / 1000.0) if durs else 0
-    stuck = t.get("stuck", 0)
-    sflag = "  !! stuck=%d" % stuck if stuck else ""
-    out.append("  [task] total %d  完整度 %4.0f%%  by_status[%s]  avg_dur %.0fs%s" % (
-        total, cr * 100, bystr, davg, sflag))
+    # task 不再 per-instance 渲染 —— 提为顶部系统级聚合(render_system_tasks)。
 
     # --- perf (top by errors then calls) ---
     out.append("  [perf] %-24s %5s %5s %6s %5s %5s" % ("op", "calls", "err", "err%", "avg", "p95"))
@@ -154,6 +170,7 @@ def main():
         return
 
     print("box 舰队运维数字表 · 观察平面 %s (agent 面 · 真实指标 · 零符号)" % EP)
+    print(render_system_tasks(latest))
     seen = set()
     for inst in sorted(latest, key=lambda i: (i not in EXPECT, i)):
         ta, snap = latest[inst]
