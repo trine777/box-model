@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxtrend — 活化节律。读 metrics box 的历史快照,按时间显示五元素脉搏的
+变化(系统是变活跃还是变沉寂、在认知循环 风→火→土→水→空 推进到哪)。
+这是观察体系的「时间轴/趋势层」。SoR: docs/observability.md."""
+import sys, json, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+ELEMENTS = [
+    ("风", ["get","show","browse","trace","globes","summary","list","legend","neighbor","overview","observ","token_status"]),
+    ("火", ["set_symbols","set_box_symbols","finish","abort","set_task","seal"]),
+    ("土", ["store","create","replace","append"]),
+    ("水", ["blob","upload","download","consume","sync","export","import","items_blob"]),
+    ("空", ["gc","manual","lint"]),
+]
+def classify(op):
+    f=op.lower()
+    for el,kws in ELEMENTS:
+        if any(k in f for k in kws): return el
+    return "风"
+def glyph(frac):
+    if frac>=0.40: return "●●●"
+    if frac>=0.15: return "●●○"
+    if frac>0:     return "●○○"
+    return "○○○"
+def _mcp(method,params,sid=None,notify=False):
+    body={"jsonrpc":"2.0","method":method,"params":params}
+    if not notify: body["id"]=1
+    h={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+    if TOK: h["Authorization"]="Bearer "+TOK
+    if sid: h["Mcp-Session-Id"]=sid
+    req=urllib.request.Request(EP+"/mcp",data=json.dumps(body).encode(),headers=h,method="POST")
+    with _op.open(req,timeout=30) as r:
+        ns=r.headers.get("Mcp-Session-Id"); raw=r.read().decode()
+    if notify: return None,ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]),ns
+    return json.loads(raw),ns
+def _tool(sid,n,a):
+    r,_=_mcp("tools/call",{"name":n,"arguments":a},sid); res=r.get("result",{})
+    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+    return json.loads(res["content"][0]["text"])
+def pulse(snap):
+    by={el:0 for el,_ in ELEMENTS}; tot=0
+    for k,v in snap.get("counters",{}).items():
+        b=k.split("|",1)[0]
+        if not b.endswith(".attempt"): continue
+        by[classify(b[:-8])]+=v; tot+=v
+    return {el:(by[el]/tot if tot else 0) for el,_ in ELEMENTS}, tot
+def main():
+    _,sid=_mcp("initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"boxtrend","version":"1.0"}})
+    _mcp("notifications/initialized",{},sid,notify=True)
+    b=_tool(sid,"box_get_box_by_key",{"key":"metrics"})
+    items=_tool(sid,"box_browse",{"box_id":b["id"],"limit":500}).get("items",[])
+    snaps=[]
+    for it in items:
+        c=it.get("content")
+        if isinstance(c,dict) and "counters" in c:
+            ts=(it.get("labels") or {}).get("snapshot_at","?")
+            snaps.append((ts,c))
+    snaps.sort(key=lambda x:x[0])
+    if not snaps:
+        print("○ metrics box 暂无快照(boxsnap 每小时落一个;手动:boxsnap)"); return
+    print("活化节律 · 五元素脉搏随时间(metrics box 历史快照)")
+    print("─"*52)
+    print(f"{'快照时刻':<17} 风  火  土  水  空")
+    for ts,snap in snaps:
+        fr,tot=pulse(snap)
+        row=" ".join(glyph(fr[el])[0]*1 if False else f"{glyph(fr[el])}" for el,_ in ELEMENTS)
+        # 简化:每元素一个活力点
+        marks=" ".join({"●●●":"盛","●●○":"温","●○○":"微","○○○":"·"}[glyph(fr[el])] for el,_ in ELEMENTS)
+        print(f"{ts[:16]:<17} {marks}")
+    print("─"*52)
+    print(f"{len(snaps)} 个快照。盛/温/微/· = 该元素活力。看列的变化 = 系统在认知循环里的移动。")
+    print("(快照随 com.box-metrics 每小时累积;趋势越长越清晰)")
+main()
