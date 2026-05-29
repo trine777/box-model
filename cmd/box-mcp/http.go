@@ -184,6 +184,22 @@ func isTailnetSource(remoteAddr string) bool {
 	return false
 }
 
+// isLoopback reports whether remoteAddr is the local loopback (127.0.0.0/8 or
+// ::1). A request from loopback originates from a process on this very host —
+// the operator at the keyboard — so it is at least as trusted as a tailnet
+// peer. This lets a local browser open http://127.0.0.1:<port>/dashboard
+// token-free (the system HTTP proxy bypasses loopback, so it dodges the
+// CGNAT-proxy 502 that hits tailnet IPs). Safe on Fly: external traffic
+// arrives via the L7 edge, so RemoteAddr is the proxy, never loopback.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // withBearer wraps next with a constant-time Bearer token check. The "Bearer "
 // prefix is required; anything else returns 401. Healthz is mounted outside
 // this middleware so platforms (fly.io health checks) can probe without
@@ -198,7 +214,7 @@ func withBearer(trustTailnet bool, want string, next http.Handler) http.Handler 
 	const prefix = "Bearer "
 	wantBytes := []byte(want)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if trustTailnet && isTailnetSource(r.RemoteAddr) {
+		if isLoopback(r.RemoteAddr) || (trustTailnet && isTailnetSource(r.RemoteAddr)) {
 			next.ServeHTTP(w, r)
 			return
 		}

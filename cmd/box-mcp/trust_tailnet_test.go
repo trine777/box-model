@@ -71,11 +71,35 @@ func TestTrustTailnet_DisabledIgnoresSourceIP(t *testing.T) {
 }
 
 func TestTrustTailnet_NonTailnetPrivateRangesNotTrusted(t *testing.T) {
-	// LAN / loopback are NOT tailnet — must still need token when trust on.
-	for _, addr := range []string{"192.168.1.50:1234", "127.0.0.1:1234", "10.0.0.5:1234", "172.16.0.9:1234"} {
+	// LAN (non-loopback) is NOT tailnet — must still need token when trust on.
+	// NOTE: loopback (127.0.0.1/::1) IS trusted unconditionally — see
+	// TestLoopbackSkipsBearer below — so it's intentionally excluded here.
+	for _, addr := range []string{"192.168.1.50:1234", "10.0.0.5:1234", "172.16.0.9:1234"} {
 		if code := serve(true, "secret", addr, ""); code != http.StatusUnauthorized {
 			t.Errorf("%s is not tailnet; should be 401 without token, got %d", addr, code)
 		}
+	}
+}
+
+// R15: loopback is trusted unconditionally (operator at the keyboard). This
+// lets a local browser open http://127.0.0.1:<port>/dashboard token-free,
+// dodging the CGNAT-proxy 502 that hits tailnet IPs. True even with
+// trust-tailnet OFF; safe on Fly (external traffic arrives via L7 edge, so
+// RemoteAddr is never loopback there).
+func TestLoopbackSkipsBearer(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:1234", "[::1]:1234", "127.255.255.254:9"} {
+		if code := serve(true, "secret", addr, ""); code != http.StatusOK {
+			t.Errorf("loopback %s should bypass Bearer (trust on), got %d", addr, code)
+		}
+		if code := serve(false, "secret", addr, ""); code != http.StatusOK {
+			t.Errorf("loopback %s should bypass Bearer even with trust OFF, got %d", addr, code)
+		}
+	}
+	if !isLoopback("127.0.0.1:80") || !isLoopback("[::1]:80") {
+		t.Errorf("isLoopback should accept 127.0.0.1 and ::1")
+	}
+	if isLoopback("8.8.8.8:80") || isLoopback("100.83.33.126:1") || isLoopback("garbage") {
+		t.Errorf("isLoopback should reject non-loopback addrs")
 	}
 }
 
