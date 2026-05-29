@@ -400,7 +400,7 @@ type neighborsInput struct {
 //	zoom   — 0 (histogram) or 1 (one BoxGlyph per box) (default 0)
 //	filter — orthogonal owner/status/labels limiter    (optional)
 type overviewInput struct {
-	Axis   string         `json:"axis" jsonschema:"axis: owner|status|label:<key> (required)"`
+	Axis   string         `json:"axis,omitempty" jsonschema:"axis: owner|status|label:<key> (default: owner). For a plain orient pass, prefer box_globes (zero args)."`
 	Zoom   int            `json:"zoom,omitempty" jsonschema:"granularity; zero=histogram, one=one glyph per box (default zero)"`
 	Filter *box.BoxFilter `json:"filter,omitempty"`
 }
@@ -1012,8 +1012,12 @@ func (h *handlers) handleOverview(ctx context.Context, _ *mcp.CallToolRequest, i
 	if in.Filter != nil {
 		filter = *in.Filter
 	}
+	axis := in.Axis
+	if axis == "" {
+		axis = "owner" // R11 loop1 J1: zero-arg overview must not dead-end
+	}
 	req := box.OverviewRequest{
-		Axis:   in.Axis,
+		Axis:   axis,
 		Zoom:   in.Zoom,
 		Filter: filter,
 	}

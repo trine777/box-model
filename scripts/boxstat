@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxstat [name_prefix] — usage metrics at a glance. Reads box_observability
+and prints a per-operation table: calls / errors / error-rate / avg latency.
+Surfaces which ops are hot, which fail, where latency lives."""
+import sys, json, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _mcp(method, params, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if not notify: body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK: h["Authorization"] = "Bearer " + TOK
+    if sid: h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=30) as r:
+        ns = r.headers.get("Mcp-Session-Id"); raw = r.read().decode()
+    if notify: return None, ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+def main():
+    prefix = sys.argv[1] if len(sys.argv) > 1 else ""
+    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxstat", "version": "1.0"}})
+    _mcp("notifications/initialized", {}, sid, notify=True)
+    r, _ = _mcp("tools/call", {"name": "box_observability", "arguments": ({"name_prefix": prefix} if prefix else {})}, sid)
+    res = r.get("result", {})
+    if res.get("isError"):
+        print("ERROR: " + res["content"][0]["text"], file=sys.stderr); sys.exit(1)
+    snap = json.loads(res["content"][0]["text"])
+    counters = snap.get("counters", {})
+    observed = snap.get("observed", {})
+    # group counters: family = name before .attempt/.success/.error (drop |tags)
+    fam = {}
+    for k, v in counters.items():
+        base = k.split("|", 1)[0]
+        parts = base.rsplit(".", 1)
+        if len(parts) != 2: continue
+        op, kind = parts
+        d = fam.setdefault(op, {"attempt": 0, "success": 0, "error": 0})
+        if kind in d: d[kind] += v
+    if not fam:
+        print("(no usage recorded yet — counters are per-process and reset on restart)")
+        return
+    print(f"{'operation':<26} {'calls':>6} {'err':>5} {'err%':>5} {'avg ms':>7}")
+    print("-" * 54)
+    for op in sorted(fam, key=lambda o: -fam[o]["attempt"]):
+        d = fam[op]; calls = d["attempt"]; err = d["error"]
+        rate = (100.0 * err / calls) if calls else 0
+        # latency from observed[op.duration_ms]
+        avg = ""
+        for ok, ov in observed.items():
+            if ok.split("|", 1)[0] == op + ".duration_ms":
+                avg = f"{ov.get('avg_ms', 0):.1f}"; break
+        flag = " ⚠" if rate >= 20 else ""
+        print(f"{op:<26} {calls:>6} {err:>5} {rate:>4.0f}% {avg:>7}{flag}")
+    print(f"\ntaken_at={snap.get('taken_at','')}  (metrics reset on server restart)")
+main()

@@ -26,11 +26,17 @@ wrappers ship in ` + "`scripts/`" + ` (install to your PATH) that collapse all
 of it to one line each. On the tailnet they need **no token**:
 
 ` + "```bash" + `
-boxcall box_globes                      # any MCP tool, one line
-boxcall box_show '{"item_id":"item_…"}' # tool + JSON args
+boxcall box_globes                      # ORIENT here first — zero-arg, lists all boxes
+boxls media-archive                     # list one box's items (no JSON, no box_id needed)
+boxcall box_show '{"item_id":"item_…"}' # any MCP tool + JSON args
 boxput ./report.pdf media-archive       # upload bytes + register item → prints item_id
 boxget item_… ./out.pdf                 # download an item's file
+boxstat                                 # usage metrics: calls / errors / latency per op
 ` + "```" + `
+
+Orient tip: start with ` + "`boxcall box_globes`" + ` (zero args). ` + "`box_overview`" + `
+also works but is axis-oriented; ` + "`box_globes`" + ` is the plain "what have I
+got" entry point.
 
 Env: ` + "`BOX_ENDPOINT`" + ` (default ` + "`http://100.83.33.126:7777`" + ` — the tailnet
 host), ` + "`BOX_TOKEN`" + ` (only needed for the public Fly endpoint). These

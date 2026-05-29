@@ -975,7 +975,7 @@ func (s *Service) Overview(ctx context.Context, callerID string, req OverviewReq
 
 	out, err := func() (Overview, error) {
 		if req.Axis == "" {
-			return Overview{}, fmt.Errorf("%w: axis is required", ErrValidation)
+			return Overview{}, fmt.Errorf("%w: axis is required — one of owner|status|label:<key> (or use box_globes for a zero-arg orient)", ErrValidation)
 		}
 		if req.Zoom < 0 || req.Zoom > 1 {
 			return Overview{}, fmt.Errorf("%w: zoom must be 0 or 1 (zoom=2 deferred to R6)", ErrValidation)

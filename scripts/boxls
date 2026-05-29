@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxls [box_key] [--history]
+  no key  → list ALL boxes (zero-arg orient entry; complete, not capped)
+  <key>   → list items in that box (resolves key→id; no JSON to write)
+Tailnet = zero token."""
+import sys, json, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _mcp(method, params, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if not notify: body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK: h["Authorization"] = "Bearer " + TOK
+    if sid: h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=30) as r:
+        ns = r.headers.get("Mcp-Session-Id"); raw = r.read().decode()
+    if notify: return None, ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+def _tool(sid, n, a):
+    r, _ = _mcp("tools/call", {"name": n, "arguments": a}, sid); res = r.get("result", {})
+    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+    return json.loads(res["content"][0]["text"])
+def list_all(sid):
+    # max_boxes_per_sphere large so nothing is capped (fixes J3)
+    g = _tool(sid, "box_globes", {"max_boxes_per_sphere": 10000})
+    rows = []
+    for sph in g.get("globes", []):
+        for b in sph.get("boxes", []): rows.append((sph["sphere"], b))
+    u = g.get("unassigned")
+    if u:
+        for b in u.get("boxes", []): rows.append(("(none)", b))
+    print(f"ALL boxes ({g.get('total_boxes', len(rows))}):")
+    print(f"  {'key':<22} {'items':>6}  {'sphere':<14}")
+    for sphere, b in sorted(rows, key=lambda r: r[1].get("key", "")):
+        print(f"  {b.get('key',''):<22} {b.get('items',0):>6}  {sphere:<14}")
+def list_box(sid, key, hist):
+    try:
+        b = _tool(sid, "box_get_box_by_key", {"key": key})
+    except RuntimeError as e:
+        print(f"ERROR: box {key!r}: {e}", file=sys.stderr); sys.exit(4)
+    args = {"box_id": b["id"], "limit": 1000}
+    if hist: args["include_history"] = True
+    items = _tool(sid, "box_browse", args).get("items", [])
+    print(f"{key}  ({len(items)} items{'  +history' if hist else ''})")
+    for it in items:
+        kind = next((s["value"] for s in it.get("symbols", []) if s["kind"] == "kind"), "?")
+        st = next((s["value"] for s in it.get("symbols", []) if s["kind"] == "status"), " ")
+        c = it.get("content"); nm = ""
+        if isinstance(c, dict): nm = c.get("name") or c.get("intent") or ""
+        print(f"  {it['id']:<40} [{kind}{st}] {it.get('format',''):<8} {str(nm)[:40]}")
+def main():
+    pos = [a for a in sys.argv[1:] if not a.startswith("--")]
+    hist = "--history" in sys.argv[1:]
+    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxls", "version": "1.1"}})
+    _mcp("notifications/initialized", {}, sid, notify=True)
+    if not pos: list_all(sid)
+    else: list_box(sid, pos[0], hist)
+main()
