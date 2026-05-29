@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxstate [--raw] — the system's CURRENT-STATE 觉痕 portrait. NOT precise
+metrics: a fuzzy, symbolic, glanceable picture for iteration decisions.
+Reuses box's own symbols (status 觉痕 + priority) so it reads instantly.
+  health  ← error-rate fuzzy set → ✓ healthy / ~ partial / ✗ ailing / ◯ idle
+  active  ← relative call volume → *** hot / ** warm / * cool / · cold
+--raw falls back to box_observability's exact numbers."""
+import sys, json, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _mcp(method, params, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if not notify: body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK: h["Authorization"] = "Bearer " + TOK
+    if sid: h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=30) as r:
+        ns = r.headers.get("Mcp-Session-Id"); raw = r.read().decode()
+    if notify: return None, ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+def health(attempt, error):
+    if attempt == 0: return "◯"          # idle — never exercised
+    r = error / attempt
+    if r == 0: return "✓"                # healthy
+    if r < 0.30: return "~"              # partial — some failures (fuzzy mid)
+    return "✗"                            # ailing
+def activity(attempt, hot):
+    if attempt == 0 or hot == 0: return "·"
+    f = attempt / hot
+    if f >= 0.50: return "***"           # hot
+    if f >= 0.15: return "**"            # warm
+    return "*"                           # cool
+def main():
+    raw = "--raw" in sys.argv[1:]
+    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxstate", "version": "1.0"}})
+    _mcp("notifications/initialized", {}, sid, notify=True)
+    r, _ = _mcp("tools/call", {"name": "box_observability", "arguments": {}}, sid)
+    snap = json.loads(r["result"]["content"][0]["text"])
+    if raw:
+        print(json.dumps(snap, ensure_ascii=False, indent=2)); return
+    counters = snap.get("counters", {})
+    fam = {}
+    for k, v in counters.items():
+        base = k.split("|", 1)[0]; parts = base.rsplit(".", 1)
+        if len(parts) != 2: continue
+        op, kind = parts
+        d = fam.setdefault(op, {"attempt": 0, "error": 0})
+        if kind == "attempt": d["attempt"] += v
+        elif kind == "error": d["error"] += v
+    if not fam:
+        print("◯ 系统静默 — 本进程尚无操作记录(重启后清零;历史见 metrics box)"); return
+    hot = max((d["attempt"] for d in fam.values()), default=1) or 1
+    ail = sum(1 for d in fam.values() if d["attempt"] and d["error"] / d["attempt"] >= 0.30)
+    part = sum(1 for d in fam.values() if d["attempt"] and 0 < d["error"] / d["attempt"] < 0.30)
+    print("box 现状画像 · 觉痕式(模糊,非精确 — 看趋势不看数)")
+    print("─" * 40)
+    print(f"{'活跃':<4} {'健康':<4} operation")
+    for op in sorted(fam, key=lambda o: -fam[o]["attempt"]):
+        d = fam[op]
+        print(f"{activity(d['attempt'], hot):<5}{health(d['attempt'], d['error']):<4} {op}")
+    print("─" * 40)
+    overall = "✗" if ail else ("~" if part else "→")
+    note = "活跃运转" if overall == "→" else (f"{ail} 处 ✗ 需关注" if ail else f"{part} 处 ~ 留意")
+    print(f"整体觉痕 {overall}  ({note})")
+    print("图例: 活跃 ***热 **温 *冷 ·静 | 健康 ✓好 ~亚 ✗病 ◯未用")
+main()

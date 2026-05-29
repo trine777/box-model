@@ -296,7 +296,8 @@ cp scripts/boxcall scripts/boxput scripts/boxget ~/.local/bin/ && chmod +x ~/.lo
 | `boxls <box_key> [--history]` | List a box's items (resolves key→id; no JSON to write) | tailnet: none |
 | `boxput <file> <box_key> [name]` | Upload bytes → `/blob/upload` → register item → prints item_id | tailnet: none |
 | `boxget <item_id> [out]` | Download an item's blob bytes | tailnet: none |
-| `boxstat [name_prefix]` | Usage metrics: calls / errors / err% / avg latency per operation | tailnet: none |
+| `boxstat [name_prefix]` | Precise usage metrics: calls / errors / err% / avg latency per operation | tailnet: none |
+| `boxstate [--raw]` | **觉痕 portrait** — fuzzy, symbolic, glanceable current-state (not precise numbers). Reuses box's own symbols: activity `***/**/*/·`, health `✓/~/✗/◯`. For iteration decisions, not monitoring. `--raw` = exact numbers. | tailnet: none |
 
 Orient with `boxcall box_globes` (zero args, lists every box). Then
 `boxls <key>` to see what's inside. `boxstat` shows which operations are
