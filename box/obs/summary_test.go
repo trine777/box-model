@@ -62,6 +62,50 @@ func TestStatsFromDurations_MillisecondConversion(t *testing.T) {
 	}
 }
 
+func TestStatsFromFloats_P95(t *testing.T) {
+	// Samples 1..100; nearest-rank p95 of sorted [1..100] is index
+	// round(0.95*99)=round(94.05)=94 -> value 95.
+	samples := make([]float64, 0, 100)
+	for i := 1; i <= 100; i++ {
+		samples = append(samples, float64(i))
+	}
+	got := statsFromFloats(samples)
+	if got.P95Ms != 95.0 {
+		t.Errorf("p95 of 1..100: got %v want 95", got.P95Ms)
+	}
+	// statsFromFloats must not mutate caller's slice ordering.
+	if samples[0] != 1.0 || samples[99] != 100.0 {
+		t.Errorf("statsFromFloats mutated input slice: %v..%v", samples[0], samples[99])
+	}
+
+	// Single sample: p95 == that sample.
+	if s := statsFromFloats([]float64{7.0}); s.P95Ms != 7.0 {
+		t.Errorf("single-sample p95: got %v want 7", s.P95Ms)
+	}
+	// Empty: p95 == 0.
+	if s := statsFromFloats(nil); s.P95Ms != 0 {
+		t.Errorf("empty p95: got %v want 0", s.P95Ms)
+	}
+	// Unsorted input still yields the correct percentile.
+	if s := statsFromFloats([]float64{50, 1, 99, 2, 100}); s.P95Ms != 100.0 {
+		t.Errorf("unsorted p95: got %v want 100", s.P95Ms)
+	}
+}
+
+func TestStatsFromDurations_P95(t *testing.T) {
+	samples := make([]time.Duration, 0, 100)
+	for i := 1; i <= 100; i++ {
+		samples = append(samples, time.Duration(i)*time.Millisecond)
+	}
+	got := statsFromDurations(samples)
+	if got.P95Ms != 95.0 {
+		t.Errorf("durations p95 of 1..100ms: got %v want 95", got.P95Ms)
+	}
+	if s := statsFromDurations(nil); s.P95Ms != 0 {
+		t.Errorf("empty durations p95: got %v want 0", s.P95Ms)
+	}
+}
+
 func TestSummary_FilterPrefix(t *testing.T) {
 	o := NewMemObserver(io.Discard, slog.LevelInfo)
 	o.Inc("box.create.success", nil)

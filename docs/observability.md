@@ -1,3 +1,5 @@
+> **SUPERSEDED by docs/obs_v2_spec.md (R15)** — 五元素/觉痕观察已废弃, 改为工程化物理+业务指标。
+
 # Observability 设计 — 符号化活化观察体系
 
 > SoR for how box-model observes itself. box + agent = a **living system**;

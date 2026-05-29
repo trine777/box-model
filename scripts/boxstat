@@ -31,7 +31,9 @@ def main():
     snap = json.loads(res["content"][0]["text"])
     counters = snap.get("counters", {})
     observed = snap.get("observed", {})
-    # group counters: family = name before .attempt/.success/.error (drop |tags)
+    # group counters: family = name before .attempt/.success/.error, with the
+    # |tag suffix (box_id=…, err_type=…) stripped so per-box / per-err_type keys
+    # collapse back to one row per bare op (summed across all boxes/tags).
     fam = {}
     for k, v in counters.items():
         base = k.split("|", 1)[0]
@@ -40,6 +42,18 @@ def main():
         op, kind = parts
         d = fam.setdefault(op, {"attempt": 0, "success": 0, "error": 0})
         if kind in d: d[kind] += v
+    # observed latency: aggregate every duration_ms series whose bare name is
+    # op.duration_ms (one per box_id after R15 tagging) into a single
+    # count-weighted average per op, so the table stays one row per op.
+    lat = {}  # op -> {"sum": float, "count": int}
+    for ok, ov in observed.items():
+        bare = ok.split("|", 1)[0]
+        if not bare.endswith(".duration_ms"): continue
+        op = bare[: -len(".duration_ms")]
+        cnt = ov.get("count", 0)
+        agg = lat.setdefault(op, {"sum": 0.0, "count": 0})
+        agg["sum"] += ov.get("sum_ms", 0.0)
+        agg["count"] += cnt
     if not fam:
         print("(no usage recorded yet — counters are per-process and reset on restart)")
         return
@@ -48,11 +62,11 @@ def main():
     for op in sorted(fam, key=lambda o: -fam[o]["attempt"]):
         d = fam[op]; calls = d["attempt"]; err = d["error"]
         rate = (100.0 * err / calls) if calls else 0
-        # latency from observed[op.duration_ms]
+        # latency: count-weighted avg across all box_id-tagged duration_ms series
         avg = ""
-        for ok, ov in observed.items():
-            if ok.split("|", 1)[0] == op + ".duration_ms":
-                avg = f"{ov.get('avg_ms', 0):.1f}"; break
+        agg = lat.get(op)
+        if agg and agg["count"]:
+            avg = f"{agg['sum'] / agg['count']:.1f}"
         flag = " ⚠" if rate >= 20 else ""
         print(f"{op:<26} {calls:>6} {err:>5} {rate:>4.0f}% {avg:>7}{flag}")
     print(f"\ntaken_at={snap.get('taken_at','')}  (metrics reset on server restart)")

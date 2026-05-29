@@ -1,44 +1,412 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""boxsnap (v2) — pull a business instance's obs, write the snapshot into the
-OBSERVATION plane's obs-fleet box. Writing on a SEPARATE instance breaks the
-self-reference: the business plane's obs is no longer polluted by the snapshot
-write. Env: BOX_BIZ_ENDPOINT (default :7777), BOX_OBS_ENDPOINT (default :7788),
-BOX_INSTANCE (label)."""
-import json, os, time, urllib.request
-BIZ = os.environ.get("BOX_BIZ_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+"""boxsnap (v2 / R15) — engineering observability collector.
+
+Per obs_v2_spec.md (a2 model / a4 collector / a5 schema). Walks the box FLEET
+(business :7777 + observation :7788; Fly EXCLUDED) and writes ONE snapshot item
+per instance into the OBSERVATION plane's `obs-metrics` box. Four metric classes,
+all real (no symbol abstraction):
+
+  capacity : host shell — df / du -sb ~/.box ~/.box-obs / blob count·bytes /
+             ps box-mcp RSS·CPU·uptime. Host-level, collected once per host.
+  perf     : box_observability counters (per-op calls/success/error/err%/
+             err_types, box_id tag STRIPPED & summed to op) + observed
+             duration_ms (avg_ms / p95_ms).
+  tasks    : box_trace kind=T over the instance -> total / by_status(✓→✗?~◯) /
+             completion_rate(=✓/total); box_list_events per task -> task_start->
+             task_finish duration; last event >24h while still -> => stuck.
+  business : box_globes box_count + per-box (key/items/latest_stored_at) +
+             per-box uses = sum of that box_id's item.* success counters
+             (box_id dimension, available after R15 埋点).
+
+Self-reference cut: snapshots ALWAYS land on the observation plane (:7788) only;
+when snapshotting the obs plane itself we still only write there. tailnet = zero
+token (urllib ProxyHandler({}) bypasses any local proxy).
+
+Env:
+  BOX_FLEET         comma list, default http://100.83.33.126:7777,http://100.83.33.126:7788 (no Fly)
+  BOX_OBS_ENDPOINT  observation plane, default http://100.83.33.126:7788
+  BOX_TOKEN         only for public/Fly; tailnet leaves it empty
+"""
+import json, os, time, subprocess, urllib.request, urllib.error
+
+FLEET = [e.strip().rstrip("/") for e in os.environ.get(
+    "BOX_FLEET", "http://100.83.33.126:7777,http://100.83.33.126:7788").split(",") if e.strip()]
 OBS = os.environ.get("BOX_OBS_ENDPOINT", "http://100.83.33.126:7788").rstrip("/")
-INST = os.environ.get("BOX_INSTANCE", BIZ.split("//")[-1])
 TOK = os.environ.get("BOX_TOKEN", "")
-_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-def mcp(ep, m, pa, sid=None, notify=False):
-    body={"jsonrpc":"2.0","method":m,"params":pa}
-    if not notify: body["id"]=1
-    h={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
-    if TOK: h["Authorization"]="Bearer "+TOK
-    if sid: h["Mcp-Session-Id"]=sid
-    req=urllib.request.Request(ep+"/mcp",data=json.dumps(body).encode(),headers=h,method="POST")
-    with _op.open(req,timeout=30) as r:
-        ns=r.headers.get("Mcp-Session-Id"); raw=r.read().decode()
-    if notify: return None,ns
+STUCK_S = 24 * 3600
+
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # ignore local proxy
+
+
+# ---------------------------------------------------------------- MCP plumbing
+def mcp(ep, method, params, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if not notify:
+        body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK:
+        h["Authorization"] = "Bearer " + TOK
+    if sid:
+        h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(ep + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=30) as r:
+        ns = r.headers.get("Mcp-Session-Id")
+        raw = r.read().decode()
+    if notify:
+        return None, ns
     for ln in raw.splitlines():
-        if ln.startswith("data: "): return json.loads(ln[6:]),ns
-    return json.loads(raw),ns
+        if ln.startswith("data: "):
+            return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+
+
 def sess(ep):
-    _,sid=mcp(ep,"initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"boxsnap","version":"2.0"}})
-    mcp(ep,"notifications/initialized",{},sid,notify=True); return sid
-def tool(ep,sid,n,a):
-    r,_=mcp(ep,"tools/call",{"name":n,"arguments":a},sid); res=r.get("result",{})
-    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+    _, sid = mcp(ep, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                    "clientInfo": {"name": "boxsnap", "version": "2.0"}})
+    mcp(ep, "notifications/initialized", {}, sid, notify=True)
+    return sid
+
+
+def tool(ep, sid, name, args):
+    r, _ = mcp(ep, "tools/call", {"name": name, "arguments": args}, sid)
+    res = r.get("result", {})
+    if res.get("isError"):
+        raise RuntimeError(res["content"][0]["text"])
     return json.loads(res["content"][0]["text"])
+
+
+# --------------------------------------------------------------- host helpers
+def _sh(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return ""
+
+
+def _du_sb(path):
+    """bytes of a dir; prefer du -sb (GNU), fall back to -sk*1024 (BSD/macOS)."""
+    if not os.path.exists(path):
+        return 0
+    out = _sh(["du", "-sb", path]).split()
+    if out:
+        try:
+            return int(out[0])
+        except ValueError:
+            pass
+    out = _sh(["du", "-sk", path]).split()
+    if out:
+        try:
+            return int(out[0]) * 1024
+        except ValueError:
+            pass
+    return 0
+
+
+def _blobs(path):
+    """(count, bytes) of regular files under <path>/blobs."""
+    d = os.path.join(path, "blobs")
+    n = b = 0
+    if os.path.isdir(d):
+        for root, _, files in os.walk(d):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    b += os.path.getsize(fp)
+                    n += 1
+                except OSError:
+                    pass
+    return n, b
+
+
+def _etime_to_s(et):
+    """ps etime ([[dd-]hh:]mm:ss) -> seconds."""
+    et = et.strip()
+    days = 0
+    if "-" in et:
+        d, et = et.split("-", 1)
+        days = int(d)
+    parts = [int(p) for p in et.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, s = parts[-3], parts[-2], parts[-1]
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
+def capacity():
+    home = os.path.expanduser("~")
+    box, obs = os.path.join(home, ".box"), os.path.join(home, ".box-obs")
+    # df: macOS/BSD `df -k` -> 1K blocks; total/used reported in bytes
+    disk_total = disk_used = 0
+    df = _sh(["df", "-k", box]).splitlines()
+    if len(df) >= 2:
+        nums = [c for c in df[-1].split() if c.isdigit()]
+        if len(nums) >= 2:
+            disk_total = int(nums[0]) * 1024
+            disk_used = int(nums[1]) * 1024
+    bc1, bb1 = _blobs(box)
+    bc2, bb2 = _blobs(obs)
+    # ps box-mcp: aggregate rss/cpu across all box-mcp procs, uptime = max etime
+    rss_kb = cpu = 0.0
+    up = nproc = 0
+    for ln in _sh(["ps", "-eo", "pid,rss,%cpu,etime,comm"]).splitlines():
+        if "box-mcp" not in ln:
+            continue
+        f = ln.split(None, 4)
+        if len(f) < 5:
+            continue
+        try:
+            rss_kb += float(f[1])
+            cpu += float(f[2])
+            up = max(up, _etime_to_s(f[3]))
+            nproc += 1
+        except (ValueError, IndexError):
+            pass
+    return {
+        "disk_used": disk_used,
+        "disk_total": disk_total,
+        "box_home_bytes": _du_sb(box) + _du_sb(obs),
+        "blob_count": bc1 + bc2,
+        "blob_bytes": bb1 + bb2,
+        "proc_rss_mb": round(rss_kb / 1024.0, 1),
+        "proc_cpu": round(cpu, 1),
+        "proc_uptime_s": up,
+        "proc_count": nproc,
+    }
+
+
+# --------------------------------------------------------------------- perf
+def _bare(key):
+    return key.split("|", 1)[0]
+
+
+def _tags(key):
+    out = {}
+    if "|" in key:
+        for seg in key.split("|")[1:]:
+            if "=" in seg:
+                k, v = seg.split("=", 1)
+                out[k] = v
+    return out
+
+
+def perf(snap):
+    """Aggregate box_observability into per-op rows. box_id stripped & summed;
+    err_type tag fans into err_types dist; observed duration_ms -> avg/p95."""
+    counters = snap.get("counters", {})
+    observed = snap.get("observed", {})
+    ops = {}  # op -> {calls,success,error,err_types}
+
+    def row(op):
+        return ops.setdefault(op, {"calls": 0, "success": 0, "error": 0, "err_types": {}})
+
+    for k, v in counters.items():
+        base = _bare(k)
+        parts = base.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        op, kind = parts
+        r = row(op)
+        if kind == "attempt":
+            r["calls"] += v
+        elif kind == "success":
+            r["success"] += v
+        elif kind == "error":
+            r["error"] += v
+            et = _tags(k).get("err_type")
+            if et:
+                r["err_types"][et] = r["err_types"].get(et, 0) + v
+    # observed duration_ms: count-weighted avg + max p95 across box_id series
+    lat = {}  # op -> {sum, count, p95}
+    for ok, ov in observed.items():
+        base = _bare(ok)
+        if not base.endswith(".duration_ms"):
+            continue
+        op = base[: -len(".duration_ms")]
+        a = lat.setdefault(op, {"sum": 0.0, "count": 0, "p95": 0.0})
+        a["sum"] += ov.get("sum_ms", 0.0)
+        a["count"] += ov.get("count", 0)
+        a["p95"] = max(a["p95"], ov.get("p95_ms", 0))
+    out = []
+    for op in sorted(ops, key=lambda o: -ops[o]["calls"]):
+        d = ops[op]
+        calls = d["calls"]
+        err = d["error"]
+        a = lat.get(op)
+        out.append({
+            "op": op,
+            "calls": calls,
+            "success": d["success"],
+            "errors": err,
+            "err_pct": round(100.0 * err / calls, 1) if calls else 0.0,
+            "err_types": d["err_types"],
+            "avg_ms": round(a["sum"] / a["count"], 2) if a and a["count"] else None,
+            "p95_ms": a["p95"] if a else None,
+        })
+    return {"ops": out}
+
+
+# -------------------------------------------------------------------- tasks
+def _parse_ts(s):
+    if not s:
+        return None
+    try:
+        return time.mktime(time.strptime(s.split(".")[0].replace("Z", ""), "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def _status_of(item):
+    for sym in item.get("symbols") or []:
+        if sym.get("kind") == "status":
+            return sym.get("value")
+    return "◯"
+
+
+def tasks(ep, sid, now_s):
+    """All kind=T items on this instance -> status dist / completion / duration /
+    stuck. by_status keyed by lifecycle glyph (✓→✗?~◯)."""
+    try:
+        res = tool(ep, sid, "box_trace", {"kind": ["kind"], "value": ["T"]})
+    except RuntimeError:
+        return {"total": 0, "by_status": {}, "completion_rate": 0.0, "stuck": 0, "durations_ms": []}
+    items = [it for it in res.get("items", []) if it.get("kind") == "task"]
+    by_status = {}
+    durations = []
+    stuck = 0
+    for it in items:
+        st = _status_of(it)
+        by_status[st] = by_status.get(st, 0) + 1
+        try:
+            evs = tool(ep, sid, "box_list_events", {"item_id": it["id"]}).get("events", [])
+        except RuntimeError:
+            evs = []
+        start = finish = last = None
+        for e in evs:
+            ts = _parse_ts(e.get("appended_at"))
+            if ts is not None:
+                last = ts if last is None else max(last, ts)
+            if e.get("op") == "task_start":
+                start = ts
+            elif e.get("op") == "task_finish":
+                finish = ts
+        if start is not None and finish is not None and finish >= start:
+            durations.append(int((finish - start) * 1000))
+        if st == "→" and last is not None and (now_s - last) > STUCK_S:
+            stuck += 1
+    total = len(items)
+    done = by_status.get("✓", 0)
+    return {
+        "total": total,
+        "by_status": by_status,
+        "completion_rate": round(done / total, 3) if total else 0.0,
+        "stuck": stuck,
+        "durations_ms": durations,
+    }
+
+
+# ----------------------------------------------------------------- business
+def business(ep, sid, snap):
+    """box_globes -> box_count + per-box; box_summary per box for authoritative
+    item count + latest_stored_at; per-box uses = sum of that box_id's item.*
+    success counters (box_id dimension)."""
+    uses_by_box = {}
+    for k, v in snap.get("counters", {}).items():
+        base = _bare(k)
+        if not (base.startswith("item.") and base.endswith(".success")):
+            continue
+        bid = _tags(k).get("box_id")
+        if bid:
+            uses_by_box[bid] = uses_by_box.get(bid, 0) + v
+    g = tool(ep, sid, "box_globes", {"max_boxes_per_sphere": 1000})
+    per_box = []
+    item_total = 0
+    box_count = 0
+    for globe in g.get("globes", []):
+        for b in globe.get("boxes", []):
+            box_count += 1
+            items = b.get("items", 0)
+            latest = b.get("latest")
+            try:
+                s = tool(ep, sid, "box_summary", {"box_id": b["id"]})
+                items = s.get("total_items", items)
+                latest = s.get("latest_stored_at", latest)
+            except RuntimeError:
+                pass
+            item_total += items
+            per_box.append({
+                "key": b.get("key"),
+                "id": b.get("id"),
+                "sphere": globe.get("sphere"),
+                "items": items,
+                "latest_stored_at": latest,
+                "uses": uses_by_box.get(b.get("id"), 0),
+            })
+    per_box.sort(key=lambda x: -x["items"])
+    return {"box_count": box_count, "item_total": item_total, "per_box": per_box}
+
+
+# --------------------------------------------------------------------- main
+def ensure_obs_box(osid):
+    try:
+        return tool(OBS, osid, "box_get_box_by_key", {"key": "obs-metrics"})["id"]
+    except RuntimeError:
+        b = tool(OBS, osid, "box_create_box", {
+            "key": "obs-metrics", "owner_id": "trine",
+            "labels": {"__op:sphere": "ops"}})
+        return b["id"]
+
+
 def main():
-    bsid=sess(BIZ); snap=tool(BIZ,bsid,"box_observability",{})
-    osid=sess(OBS); fb=tool(OBS,osid,"box_get_box_by_key",{"key":"obs-fleet"})
-    ts=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    item=tool(OBS,osid,"box_store",{"box_id":fb["id"],"kind":"O","source_type":"observability",
-        "storage_uri":f"row://fleet/{INST}/{ts}","idem_key":f"snap-{INST}-{ts}","format":"json",
-        "content":{"instance":INST,"taken_at":ts,"snapshot":snap},
-        "labels":{"__op:sphere":"ops","instance":INST,"snapshot_at":ts},
-        "symbols":[{"kind":"kind","value":"O"},{"kind":"scope","value":"ops"},{"kind":"topic","value":"fleet-snapshot"}]})
-    print(f"snapshot [{INST}] {ts}: {len(snap.get('counters',{}))} counters → obs-plane (self-ref cut)")
-main()
+    host = OBS.split("//")[-1].split(":")[0]
+    now_s = time.time()
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now_s))
+    cap = capacity()  # host-level, collected once
+
+    osid = sess(OBS)
+    box_id = ensure_obs_box(osid)
+
+    written = []
+    for ep in FLEET:
+        inst = ep.split("//")[-1]
+        try:
+            esid = sess(ep)
+            snap = tool(ep, esid, "box_observability", {})
+            row = {
+                "instance": inst,
+                "host": host,
+                "taken_at": ts,
+                "capacity": cap,
+                "tasks": tasks(ep, esid, now_s),
+                "perf": perf(snap),
+                "business": business(ep, esid, snap),
+            }
+        except (urllib.error.URLError, RuntimeError, OSError) as e:
+            row = {"instance": inst, "host": host, "taken_at": ts, "down": True,
+                   "error": str(e), "capacity": cap,
+                   "tasks": {"total": 0, "by_status": {}, "completion_rate": 0.0, "stuck": 0},
+                   "perf": {"ops": []},
+                   "business": {"box_count": 0, "item_total": 0, "per_box": []}}
+        tool(OBS, osid, "box_store", {
+            "box_id": box_id, "kind": "O", "source_type": "metrics",
+            "storage_uri": f"row://obs-metrics/{inst}/{ts}",
+            "idem_key": f"obsmetrics-{inst}-{ts}", "format": "json",
+            "content": row,
+            "labels": {"__op:sphere": "ops", "instance": inst, "taken_at": ts},
+            "symbols": [{"kind": "kind", "value": "O"}, {"kind": "scope", "value": "ops"},
+                        {"kind": "topic", "value": "obs-metrics"}],
+        })
+        t = row.get("tasks", {})
+        b = row.get("business", {})
+        p = row.get("perf", {}).get("ops", [])
+        flag = " DOWN" if row.get("down") else ""
+        written.append(inst)
+        print(f"[{inst}]{flag} cap disk={cap['disk_used']}/{cap['disk_total']}B "
+              f"blob={cap['blob_count']} rss={cap['proc_rss_mb']}MB | "
+              f"tasks total={t.get('total',0)} done%={t.get('completion_rate',0)} stuck={t.get('stuck',0)} | "
+              f"perf ops={len(p)} | biz boxes={b.get('box_count',0)} items={b.get('item_total',0)}")
+    print(f"-> obs-metrics box={box_id} ts={ts} instances={written}")
+
+
+if __name__ == "__main__":
+    main()

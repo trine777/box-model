@@ -1,124 +1,238 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""boxboard — 人可观测入口。三件事,全程绕系统代理(ProxyHandler({})),
-所以本机开着 Clash/Surge 也不会 502:
-  1. 抓观察平面 /dashboard 的 HTML(单一渲染源=dashboard.go),写本地文件
+"""boxboard (v2 / R15) — 人面观察入口。读 obs-metrics 数字表(obs_v2_spec a6),
+零五元素 / 零觉痕。全程绕系统代理(ProxyHandler({})),本机开 Clash/Surge 不 502。
+
+三件事:
+  1. 终端打印真实数字表(四类指标:容量 / task 完整度 / 性能 / 业务)。
+  2. 抓观察平面 /dashboard 的 HTML(单一渲染源=dashboard.go),写本地文件
      ~/.box-obs/dashboard.html,再 `open file://` —— 浏览器读本地文件,不经代理。
-  2. 终端打印 ASCII 现状(人直接在终端看)。
-  3. 落一份 markdown 快照进 obs-fleet box(留痕,人也能用任意 viewer 翻历史)。
-Env: BOX_ENDPOINT(默认观察平面 :7788)."""
-import sys, os, json, time, urllib.request, webbrowser, subprocess
+  3. 落一份 markdown 数字表快照进 obs-fleet box 留痕(任意 viewer 可翻历史)。
+
+Env: BOX_ENDPOINT(默认观察平面 :7788)、BOX_FLEET_EXPECT(期望实例)、BOX_TOKEN."""
+import os, json, time, urllib.request, webbrowser, subprocess
+
 EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7788").rstrip("/")
 TOK = os.environ.get("BOX_TOKEN", "")
+EXPECT = [e.strip() for e in os.environ.get(
+    "BOX_FLEET_EXPECT", "100.83.33.126:7777,100.83.33.126:7788").split(",") if e.strip()]
 OUT = os.path.expanduser("~/.box-obs/dashboard.html")
 _op = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 绕代理,免 502
 
+
 def _get(path):
     req = urllib.request.Request(EP + path)
-    if TOK: req.add_header("Authorization", "Bearer " + TOK)
+    if TOK:
+        req.add_header("Authorization", "Bearer " + TOK)
     with _op.open(req, timeout=20) as r:
         return r.read().decode(), r.getcode()
 
+
 def mcp(m, pa, sid=None, notify=False):
-    body = {"jsonrpc":"2.0","method":m,"params":pa}
-    if not notify: body["id"]=1
-    h = {"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
-    if TOK: h["Authorization"]="Bearer "+TOK
-    if sid: h["Mcp-Session-Id"]=sid
-    req = urllib.request.Request(EP+"/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    body = {"jsonrpc": "2.0", "method": m, "params": pa}
+    if not notify:
+        body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK:
+        h["Authorization"] = "Bearer " + TOK
+    if sid:
+        h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
     with _op.open(req, timeout=30) as r:
-        ns=r.headers.get("Mcp-Session-Id"); raw=r.read().decode()
-    if notify: return None, ns
+        ns = r.headers.get("Mcp-Session-Id")
+        raw = r.read().decode()
+    if notify:
+        return None, ns
     for ln in raw.splitlines():
-        if ln.startswith("data: "): return json.loads(ln[6:]), ns
+        if ln.startswith("data: "):
+            return json.loads(ln[6:]), ns
     return json.loads(raw), ns
 
+
 def tool(sid, n, a):
-    r,_ = mcp("tools/call", {"name":n,"arguments":a}, sid); res=r.get("result",{})
-    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+    r, _ = mcp("tools/call", {"name": n, "arguments": a}, sid)
+    res = r.get("result", {})
+    if res.get("isError"):
+        raise RuntimeError(res["content"][0]["text"])
     return json.loads(res["content"][0]["text"])
 
-ELS = [("风","感知",["get","show","browse","trace","globes","summary","list","legend","neighbor","overview","observ","token_status"]),
-       ("火","判断",["set_symbols","set_box_symbols","finish","abort","set_task","seal"]),
-       ("土","成形",["store","create","replace","append"]),
-       ("水","连接",["blob","upload","download","consume","sync","export","import","items_blob"]),
-       ("空","治理",["gc","manual","lint"])]
-def elem(op):
-    f=op.lower()
-    for kw in ("gc","manual","lint"):
-        if kw in f: return "空"
-    for s,_,kws in ELS:
-        if any(k in f for k in kws): return s
-    return "风"
-def band(fr):
-    return ("●●●","盛") if fr>=0.40 else ("●●○","温") if fr>=0.15 else ("●○○","微") if fr>0 else ("○○○","静")
 
-def portrait():
-    """返回 (ascii_str, markdown_str)。读 obs-fleet 各实例最新快照。"""
-    _, sid = mcp("initialize", {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"boxboard","version":"1.0"}})
-    mcp("notifications/initialized", {}, sid, notify=True)
-    b = tool(sid, "box_get_box_by_key", {"key":"obs-fleet"})
-    items = tool(sid, "box_browse", {"box_id":b["id"],"limit":5000}).get("items",[])
+def gb(n):
+    try:
+        return n / (1024.0 ** 3)
+    except Exception:
+        return 0.0
+
+
+def human_age(latest):
+    if not latest:
+        return "-"
+    try:
+        s = latest.split(".")[0].replace("Z", "")
+        t = time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%S"))
+        d = time.time() - t
+        if d < 3600:
+            return f"{int(d/60)}m前"
+        if d < 86400:
+            return f"{int(d/3600)}h前"
+        return f"{int(d/86400)}d前"
+    except Exception:
+        return latest[:10]
+
+
+def fetch_latest(sid):
+    """obs-metrics -> {instance: (taken_at, content)}。"""
+    b = tool(sid, "box_get_box_by_key", {"key": "obs-metrics"})
+    items = tool(sid, "box_browse", {"box_id": b["id"], "limit": 5000}).get("items", [])
     latest = {}
     for it in items:
         c = it.get("content")
-        if not isinstance(c, dict): continue
-        inst=c.get("instance","?"); ta=c.get("taken_at","")
-        if inst not in latest or ta>latest[inst][0]: latest[inst]=(ta,c.get("snapshot",{}))
-    A=["box 系统现状 · 觉痕仪表盘 (人面)",""]
-    M=["# box 系统现状 · 觉痕仪表盘","","> 人机协同观察面 · 符号同源(觉痕/五元素)· 模糊非精确",""]
+        if not isinstance(c, dict):
+            continue
+        inst = c.get("instance", "?")
+        ta = c.get("taken_at", "")
+        if inst not in latest or ta > latest[inst][0]:
+            latest[inst] = (ta, c)
+    return latest
+
+
+def boards(latest):
+    """返回 (terminal_text, markdown)。两者皆纯数字表,无符号。"""
+    A = ["box 系统现状 · 数字表 (人面) · 观察平面 %s" % EP, ""]
+    ts_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    M = ["# box 系统现状 · 工程数字表", "",
+         "> obs_v2 真实指标快照 · 容量 / task / 性能 / 业务 · 零符号抽象  ",
+         "> 渲染于 %s · 端点 %s" % (ts_now, EP), ""]
+
     if not latest:
-        A.append("◯ obs-fleet 暂无快照"); M.append("◯ obs-fleet 暂无快照")
-        return "\n".join(A), "\n".join(M), b["id"], sid
-    for inst,(ta,snap) in sorted(latest.items()):
-        cs=snap.get("counters",{}); byel={s:0 for s,_,_ in ELS}; tot=0; ops={}
-        for k,v in cs.items():
-            base=k.split("|",1)[0]
-            if "." not in base: continue
-            op,kind=base.rsplit(".",1); ops.setdefault(op,{"a":0,"e":0})
-            if kind=="attempt": ops[op]["a"]+=v; byel[elem(op)]+=v; tot+=v
-            elif kind=="error": ops[op]["e"]+=v
-        ail=sorted(op for op,d in ops.items() if d["a"] and d["e"]/d["a"]>=0.30)
-        hp=sum(1 for d in ops.values() if d["a"] and d["e"]==0)
-        pa=sum(1 for d in ops.values() if d["a"] and 0<d["e"]/d["a"]<0.30)
-        hot=[s for s,_,_ in ELS if band(byel[s]/tot if tot else 0)[1] in("盛","温")]
-        A += [f"◐ {inst}   快照 {ta}", "  活法·五元素脉搏"]
-        M += [f"## ◐ {inst}", f"_快照 {ta}_","","| 元素 | | 活力 |","|---|---|---|"]
-        for s,nm,_ in ELS:
-            g,w=band(byel[s]/tot if tot else 0)
-            A.append(f"    {s} {nm}  {g} {w}")
-            M.append(f"| {s} {nm} | {g} | {w} |")
-        v="✗" if ail else "✓"
-        A += [f"  活化态: {''.join(hot) or '—'} 主导",
-              f"  健康·觉痕  ✓{hp} 健康  ~{pa} 亚  {v if ail else '✗'}{len(ail)} 病" + (f"  ({', '.join(ail)})" if ail else ""), ""]
-        M += ["", f"**活化态**: {''.join(hot) or '—'} 主导  ",
-              f"**健康**: ✓ {hp} 健康 · ~ {pa} 亚 · ✗ {len(ail)} 病" + (f" ({', '.join(ail)})" if ail else ""), ""]
-    A.append("活力 ●●●盛 ●●○温 ●○○微 ○○○静 · 健康 ✓好 ~亚 ✗病")
-    return "\n".join(A), "\n".join(M), b["id"], sid
+        A.append("(obs-metrics 暂无快照 — 先跑 boxsnap)")
+        M.append("(obs-metrics 暂无快照 — 先跑 boxsnap)")
+        return "\n".join(A), "\n".join(M)
+
+    seen = set()
+    for inst in sorted(latest, key=lambda i: (i not in EXPECT, i)):
+        ta, snap = latest[inst]
+        seen.add(inst)
+        cap = snap.get("capacity", {})
+        t = snap.get("tasks", {})
+        perf = snap.get("perf", {}).get("ops", [])
+        biz = snap.get("business", {})
+        down = snap.get("down")
+        flag = " [DOWN]" if down else ""
+
+        du, dt = cap.get("disk_used", 0), cap.get("disk_total", 0)
+        dpct = (100.0 * du / dt) if dt else 0.0
+        cr = t.get("completion_rate", 0.0)
+        by = t.get("by_status", {})
+        bystr = " ".join("%s%d" % (k, v) for k, v in sorted(by.items(), key=lambda kv: -kv[1])) or "-"
+        durs = t.get("durations_ms", [])
+        davg = (sum(durs) / len(durs) / 1000.0) if durs else 0
+
+        # --- terminal ---
+        A.append("== %s%s   快照 %s" % (inst, flag, ta))
+        if down:
+            A.append("   不可达: %s" % snap.get("error", "?"))
+        A.append("  容量  disk %.1f%% (%.1f/%.1fGB) | box_home %.1fMB | blob %d/%.1fMB | "
+                 "rss %sMB cpu %s%% up %.1fh" % (
+                     dpct, gb(du), gb(dt), cap.get("box_home_bytes", 0) / 1048576.0,
+                     cap.get("blob_count", 0), cap.get("blob_bytes", 0) / 1048576.0,
+                     cap.get("proc_rss_mb", 0), cap.get("proc_cpu", 0),
+                     cap.get("proc_uptime_s", 0) / 3600.0))
+        sflag = "  !!stuck=%d" % t.get("stuck", 0) if t.get("stuck") else ""
+        A.append("  task  total %d 完整度 %.0f%% [%s] avg %.0fs%s" % (
+            t.get("total", 0), cr * 100, bystr, davg, sflag))
+        A.append("  perf  %-22s %5s %5s %6s %5s %5s" % ("op", "calls", "err", "err%", "avg", "p95"))
+        for o in sorted(perf, key=lambda o: (-o.get("err_pct", 0), -o.get("calls", 0)))[:6]:
+            ep = o.get("err_pct", 0)
+            avg, p95 = o.get("avg_ms"), o.get("p95_ms")
+            A.append("        %-22s %5d %5d %5.0f%% %5s %5s%s" % (
+                o.get("op", "?")[:22], o.get("calls", 0), o.get("errors", 0), ep,
+                ("%.1f" % avg) if avg else "-", ("%.0f" % p95) if p95 else "-",
+                " !" if ep >= 20 else ""))
+        A.append("  biz   boxes %d items %d  top:" % (biz.get("box_count", 0), biz.get("item_total", 0)))
+        for b in (biz.get("per_box", []) or [])[:6]:
+            A.append("        %-22s items %5d uses %4d  %s" % (
+                (b.get("key") or "?")[:22], b.get("items", 0), b.get("uses", 0),
+                human_age(b.get("latest_stored_at"))))
+        A.append("")
+
+        # --- markdown ---
+        M.append("## %s%s" % (inst, flag))
+        M.append("_快照 %s_" % ta)
+        if down:
+            M.append("> 不可达: %s" % snap.get("error", "?"))
+        M.append("")
+        M.append("**容量**: disk %.1f%% (%.1f/%.1f GB) · box_home %.1f MB · blob %d / %.1f MB · "
+                 "rss %s MB · cpu %s%% · up %.1f h  " % (
+                     dpct, gb(du), gb(dt), cap.get("box_home_bytes", 0) / 1048576.0,
+                     cap.get("blob_count", 0), cap.get("blob_bytes", 0) / 1048576.0,
+                     cap.get("proc_rss_mb", 0), cap.get("proc_cpu", 0),
+                     cap.get("proc_uptime_s", 0) / 3600.0))
+        M.append("**task**: total %d · 完整度 %.0f%% · by_status [%s] · avg %.0fs · stuck %d  " % (
+            t.get("total", 0), cr * 100, bystr, davg, t.get("stuck", 0)))
+        M += ["", "性能 (top):", "", "| op | calls | err | err% | avg ms | p95 ms |", "|---|---:|---:|---:|---:|---:|"]
+        for o in sorted(perf, key=lambda o: (-o.get("err_pct", 0), -o.get("calls", 0)))[:8]:
+            avg, p95 = o.get("avg_ms"), o.get("p95_ms")
+            M.append("| %s | %d | %d | %.0f%% | %s | %s |" % (
+                o.get("op", "?"), o.get("calls", 0), o.get("errors", 0), o.get("err_pct", 0),
+                ("%.1f" % avg) if avg else "-", ("%.0f" % p95) if p95 else "-"))
+        M += ["", "业务 per-box (top):", "", "| key | items | uses | updated |", "|---|---:|---:|---|"]
+        for b in (biz.get("per_box", []) or [])[:8]:
+            M.append("| %s | %d | %d | %s |" % (
+                b.get("key") or "?", b.get("items", 0), b.get("uses", 0),
+                human_age(b.get("latest_stored_at"))))
+        M.append("")
+
+    for inst in EXPECT:
+        if inst not in seen:
+            A.append("== %s [DOWN]  无任何快照(期望成员缺席)" % inst)
+            M.append("## %s [DOWN]\n无任何快照(期望成员缺席)\n" % inst)
+    return "\n".join(A), "\n".join(M)
+
 
 def main():
-    asc, md, fleet_id, sid = portrait()
-    print(asc)                                            # 1) 终端 ASCII
-    try:                                                  # 2) 本地 HTML(绕代理)
-        html, code = _get("/dashboard")
-        if code==200:
-            os.makedirs(os.path.dirname(OUT), exist_ok=True)
-            with open(OUT,"w") as f: f.write(html)
-            print(f"\n[本地仪表盘] file://{OUT}  (浏览器开本地文件,绕代理免 502)")
-            try: subprocess.run(["open", OUT], check=False)
-            except Exception: webbrowser.open("file://"+OUT)
-    except Exception as e:
-        print(f"\n[本地仪表盘] 抓取 /dashboard 失败: {e}")
-    try:                                                  # 3) 落 markdown 留痕
-        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        tool(sid, "box_store", {"box_id":fleet_id,
-            "kind":"M", "source_type":"board",
-            "storage_uri":f"row://board/render/{ts}",
-            "idem_key":f"board-{ts}", "format":"markdown",
-            "content": md,
-            "labels":{"__op:sphere":"ops","board":"render","rendered_at":ts},
-            "symbols":[{"kind":"kind","value":"M"},{"kind":"scope","value":"ops"},{"kind":"topic","value":"board-render"}]})
-        print("[留痕] markdown 快照已落 obs-fleet box(人可用 viewer 翻历史)")
+    _, sid = mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "boxboard", "version": "2.0"}})
+    mcp("notifications/initialized", {}, sid, notify=True)
+    try:
+        latest = fetch_latest(sid)
     except RuntimeError as e:
-        print(f"[留痕] 跳过({e})")
+        print("(读 obs-metrics 失败: %s — 此端点非 :7788? boxsnap 未跑?)" % e)
+        return
+
+    term, md = boards(latest)
+    print(term)  # 1) 终端数字表
+
+    try:  # 2) 本地 HTML(绕代理)
+        html, code = _get("/dashboard")
+        if code == 200:
+            os.makedirs(os.path.dirname(OUT), exist_ok=True)
+            with open(OUT, "w") as f:
+                f.write(html)
+            print("\n[本地仪表盘] file://%s  (浏览器开本地文件,绕代理免 502)" % OUT)
+            try:
+                subprocess.run(["open", OUT], check=False)
+            except Exception:
+                webbrowser.open("file://" + OUT)
+        else:
+            print("\n[本地仪表盘] /dashboard HTTP %s" % code)
+    except Exception as e:
+        print("\n[本地仪表盘] 抓取 /dashboard 失败: %s" % e)
+
+    try:  # 3) 落 markdown 数字表留痕
+        b = tool(sid, "box_get_box_by_key", {"key": "obs-fleet"})
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        tool(sid, "box_store", {
+            "box_id": b["id"], "kind": "M", "source_type": "board",
+            "storage_uri": f"row://board/render/{ts}",
+            "idem_key": f"board-{ts}", "format": "markdown",
+            "content": md,
+            "labels": {"__op:sphere": "ops", "board": "render", "rendered_at": ts},
+            "symbols": [{"kind": "kind", "value": "M"}, {"kind": "scope", "value": "ops"},
+                        {"kind": "topic", "value": "board-render"}]})
+        print("[留痕] markdown 数字表快照已落 obs-fleet box(可用任意 viewer 翻历史)")
+    except RuntimeError as e:
+        print("[留痕] 跳过(%s)" % e)
+
+
 main()

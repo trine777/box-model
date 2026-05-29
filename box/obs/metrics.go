@@ -123,6 +123,25 @@ type TimerStats struct {
 	AvgMs float64 `json:"avg_ms"`
 	MinMs float64 `json:"min_ms"`
 	MaxMs float64 `json:"max_ms"`
+	P95Ms float64 `json:"p95_ms"`
+}
+
+// p95Of returns the nearest-rank 95th percentile of an already-sorted
+// (ascending) slice of millisecond samples. Empty input yields 0. The rank
+// index is round(0.95*(n-1)) clamped to [0,n-1].
+func p95Of(sortedMs []float64) float64 {
+	n := len(sortedMs)
+	if n == 0 {
+		return 0
+	}
+	idx := int(0.95*float64(n-1) + 0.5)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > n-1 {
+		idx = n - 1
+	}
+	return sortedMs[idx]
 }
 
 // SnapshotSummary is the wire-format counterpart to Snapshot. It compresses
@@ -201,11 +220,13 @@ func statsFromDurations(samples []time.Duration) TimerStats {
 		return TimerStats{}
 	}
 	toMs := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
+	ms := make([]float64, len(samples))
 	min := toMs(samples[0])
 	max := min
 	sum := 0.0
-	for _, d := range samples {
+	for i, d := range samples {
 		v := toMs(d)
+		ms[i] = v
 		sum += v
 		if v < min {
 			min = v
@@ -214,12 +235,14 @@ func statsFromDurations(samples []time.Duration) TimerStats {
 			max = v
 		}
 	}
+	sort.Float64s(ms)
 	return TimerStats{
 		Count: len(samples),
 		SumMs: sum,
 		AvgMs: sum / float64(len(samples)),
 		MinMs: min,
 		MaxMs: max,
+		P95Ms: p95Of(ms),
 	}
 }
 
@@ -227,6 +250,8 @@ func statsFromFloats(samples []float64) TimerStats {
 	if len(samples) == 0 {
 		return TimerStats{}
 	}
+	ms := make([]float64, len(samples))
+	copy(ms, samples)
 	min := samples[0]
 	max := min
 	sum := 0.0
@@ -239,12 +264,14 @@ func statsFromFloats(samples []float64) TimerStats {
 			max = v
 		}
 	}
+	sort.Float64s(ms)
 	return TimerStats{
 		Count: len(samples),
 		SumMs: sum,
 		AvgMs: sum / float64(len(samples)),
 		MinMs: min,
 		MaxMs: max,
+		P95Ms: p95Of(ms),
 	}
 }
 

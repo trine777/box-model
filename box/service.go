@@ -322,6 +322,7 @@ func (s *Service) SealBox(ctx context.Context, callerID, boxID string) error {
 func (s *Service) Store(ctx context.Context, callerID, boxID string, req StoreRequest, writeOpts ...WriteOption) (Item, error) {
 	wo := resolveWriteOpts(writeOpts)
 	tags := map[string]string{
+		"box_id":         boxID,
 		"kind":           req.Kind,
 		"source_type":    req.SourceType,
 		"storage_scheme": uriScheme(req.StorageURI),
@@ -417,7 +418,7 @@ func (s *Service) Store(ctx context.Context, callerID, boxID string, req StoreRe
 }
 
 func (s *Service) Browse(ctx context.Context, boxID string, filter BrowseFilter) ([]Item, error) {
-	tags := map[string]string{}
+	tags := map[string]string{"box_id": boxID}
 	s.obs.Inc("item.browse.attempt", tags)
 	start := time.Now()
 
@@ -453,6 +454,11 @@ func (s *Service) GetItem(ctx context.Context, callerID, itemID string) (Item, e
 	start := time.Now()
 
 	item, err := s.store.GetItem(ctx, itemID)
+	// box_id is only knowable after the lookup resolves; stamp it on the
+	// success-path tags (the attempt counter above has no box context yet).
+	if err == nil {
+		tags["box_id"] = item.BoxID
+	}
 
 	dur := float64(time.Since(start).Milliseconds())
 	if err != nil {
@@ -491,6 +497,7 @@ func (s *Service) Consume(ctx context.Context, callerID, itemID string, opts Con
 		if err != nil {
 			return Item{}, err
 		}
+		tags["box_id"] = item.BoxID
 		if err := s.store.RecordConsume(ctx, ConsumeLog{
 			ID:           NewID("consume_"),
 			ItemID:       itemID,
@@ -545,6 +552,7 @@ func (s *Service) ReplaceItem(ctx context.Context, callerID, prevItemID string, 
 		if err != nil {
 			return Item{}, err
 		}
+		tags["box_id"] = prev.BoxID
 		if !prev.IsLatest {
 			return Item{}, ErrConflict
 		}
@@ -671,6 +679,7 @@ func (s *Service) UpdateLabels(ctx context.Context, callerID, itemID string, lab
 		if err != nil {
 			return Item{}, err
 		}
+		tags["box_id"] = item.BoxID
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
 			return Item{}, err
@@ -723,6 +732,7 @@ func (s *Service) MergeLabels(ctx context.Context, callerID, itemID string, patc
 		if err != nil {
 			return Item{}, err
 		}
+		tags["box_id"] = item.BoxID
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
 			return Item{}, err
@@ -778,6 +788,7 @@ func (s *Service) RemoveLabels(ctx context.Context, callerID, itemID string, key
 		if err != nil {
 			return Item{}, err
 		}
+		tags["box_id"] = item.BoxID
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
 			return Item{}, err
@@ -827,6 +838,7 @@ func (s *Service) ListConsumes(ctx context.Context, callerID, itemID string) ([]
 		if err != nil {
 			return nil, err
 		}
+		tags["box_id"] = item.BoxID
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
 			return nil, err
@@ -906,6 +918,7 @@ func (s *Service) DeleteItem(ctx context.Context, callerID, itemID string, write
 			}
 			return Item{}, err
 		}
+		tags["box_id"] = item.BoxID
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
 			return Item{}, err
@@ -1467,6 +1480,7 @@ func (s *Service) SetItemSymbols(ctx context.Context, callerID, itemID string, s
 		if err != nil {
 			return Item{}, err
 		}
+		tags["box_id"] = item.BoxID
 		b, err := s.store.GetBox(ctx, item.BoxID)
 		if err != nil {
 			return Item{}, err

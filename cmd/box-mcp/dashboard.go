@@ -1,16 +1,25 @@
 package main
 
-// R14: human-observable dashboard. The observation plane is a human↔machine
-// collaboration surface — agents query symbols over MCP; humans open a
-// browser. Both read the SAME symbolic truth (觉痕 / 五元素 / priority),
-// just rendered differently. This is the payoff of symbol-homology: 觉痕
-// ✓~✗◯ and 风火土水空 are a shared human-machine language — a human needs
-// no counter literacy to read "风 ●●● 盛".
+// R15: human-observable engineering dashboard (obs v2, docs/obs_v2_spec.md a6).
 //
-// GET /dashboard renders an HTML 觉痕 portrait from the obs-fleet box's
-// latest snapshot per instance. Mounted behind the same trust-tailnet
-// Bearer middleware, so any tailnet device's browser can open it
-// token-free.
+// v1 (R14) rendered a 五元素/觉痕 symbolic portrait that was judged unusable —
+// philosophy, not engineering reality. v2 throws out the symbol abstraction and
+// shows ONLY real physical + business numbers: machine capacity, task execution
+// completeness, request performance, and per-box usage/freshness.
+//
+// GET /dashboard renders an HTML number-table from the obs-metrics box's latest
+// snapshot per instance (the observation plane :7788, NOT the old obs-fleet
+// symbolic box). Mounted behind the trust-tailnet Bearer middleware, so any
+// tailnet device's browser can open it token-free. Fly is NOT in the fleet.
+//
+// Schema consumed (obs_v2_spec.md a5, obs-metrics item content):
+//
+//	{instance, host, taken_at,
+//	 capacity:{disk_used,disk_total,box_home_bytes,blob_count,blob_bytes,
+//	           proc_rss_mb,proc_cpu,proc_uptime_s},
+//	 tasks:{total,by_status{},completion_rate,stuck},
+//	 perf:{ops:[{op,calls,errors,err_pct,err_types{},avg_ms,p95_ms}]},
+//	 business:{box_count,item_total,per_box:[{key,items,latest_stored_at,uses}]}}
 
 import (
 	"context"
@@ -24,137 +33,72 @@ import (
 	"github.com/windborneos/box-model/box"
 )
 
-// fiveElements maps an operation name to a fengyin mind element (SoR:
-// fengyin/010-mind-five-elements). Keep in sync with scripts/boxlife.
-var fiveElements = []struct {
-	Sym  string
-	Name string
-	Kws  []string
-}{
-	{"风", "感知", []string{"get", "show", "browse", "trace", "globes", "summary", "list", "legend", "neighbor", "overview", "observ", "token_status"}},
-	{"火", "判断", []string{"set_symbols", "set_box_symbols", "finish", "abort", "set_task", "seal"}},
-	{"土", "成形", []string{"store", "create", "replace", "append"}},
-	{"水", "连接", []string{"blob", "upload", "download", "consume", "sync", "export", "import", "items_blob"}},
-	{"空", "治理", []string{"gc", "manual", "lint"}},
+// expectedFleet is the set of fleet members obs v2 watches (spec a1). Any
+// expected member missing from the latest obs-metrics snapshots is rendered as
+// "down". Fly is deliberately excluded.
+var expectedFleet = []string{"100.83.33.126:7777", "100.83.33.126:7788"}
+
+// snapshot is one instance's decoded obs-metrics content (spec a5).
+type snapshot struct {
+	Instance string `json:"instance"`
+	Host     string `json:"host"`
+	TakenAt  string `json:"taken_at"`
+	Capacity struct {
+		DiskUsed     float64 `json:"disk_used"`
+		DiskTotal    float64 `json:"disk_total"`
+		BoxHomeBytes float64 `json:"box_home_bytes"`
+		BlobCount    float64 `json:"blob_count"`
+		BlobBytes    float64 `json:"blob_bytes"`
+		ProcRSSMb    float64 `json:"proc_rss_mb"`
+		ProcCPU      float64 `json:"proc_cpu"`
+		ProcUptimeS  float64 `json:"proc_uptime_s"`
+	} `json:"capacity"`
+	Tasks struct {
+		Total          int            `json:"total"`
+		ByStatus       map[string]int `json:"by_status"`
+		CompletionRate float64        `json:"completion_rate"`
+		Stuck          int            `json:"stuck"`
+	} `json:"tasks"`
+	Perf struct {
+		Ops []struct {
+			Op       string         `json:"op"`
+			Calls    int            `json:"calls"`
+			Errors   int            `json:"errors"`
+			ErrPct   float64        `json:"err_pct"`
+			ErrTypes map[string]int `json:"err_types"`
+			AvgMs    float64        `json:"avg_ms"`
+			P95Ms    float64        `json:"p95_ms"`
+		} `json:"ops"`
+	} `json:"perf"`
+	Business struct {
+		BoxCount  int `json:"box_count"`
+		ItemTotal int `json:"item_total"`
+		PerBox    []struct {
+			Key            string `json:"key"`
+			Items          int    `json:"items"`
+			LatestStoredAt string `json:"latest_stored_at"`
+			Uses           int    `json:"uses"`
+		} `json:"per_box"`
+	} `json:"business"`
 }
 
-func elementOf(op string) string {
-	f := strings.ToLower(op)
-	// 空(治理)优先:gc/manual/lint 的主语义是治理,即便字面含 "blob"
-	// (gc_blobs) 也不归水。Specific-intent wins over substring collision.
-	for _, kw := range []string{"gc", "manual", "lint"} {
-		if strings.Contains(f, kw) {
-			return "空"
-		}
-	}
-	for _, el := range fiveElements {
-		for _, kw := range el.Kws {
-			if strings.Contains(f, kw) {
-				return el.Sym
-			}
-		}
-	}
-	return "风"
-}
-
-// fuzzyBand turns a fraction into the (glyph, word) fuzzy activity band —
-// same 模糊数学 banding as boxlife.
-func fuzzyBand(frac float64) (string, string) {
-	switch {
-	case frac >= 0.40:
-		return "●●●", "盛"
-	case frac >= 0.15:
-		return "●●○", "温"
-	case frac > 0:
-		return "●○○", "微"
-	default:
-		return "○○○", "静"
-	}
-}
-
-// instanceState is one business instance's distilled portrait.
-type instanceState struct {
-	Instance string
-	TakenAt  string
-	Pulse    map[string]float64 // element → fraction
-	Healthy  int
-	Partial  int
-	Ailing   int
-	AilOps   []string
-}
-
-// distill reads a fleet snapshot's counters into a portrait (five-element
-// pulse + 觉痕 health), reusing the same logic as boxlife/boxstate.
-func distill(instance, takenAt string, snapshot map[string]any) instanceState {
-	st := instanceState{Instance: instance, TakenAt: takenAt, Pulse: map[string]float64{}}
-	counters, _ := snapshot["counters"].(map[string]any)
-	byEl := map[string]float64{}
-	total := 0.0
-	// per-op attempt/error to compute health
-	type ae struct{ attempt, error float64 }
-	ops := map[string]*ae{}
-	for k, v := range counters {
-		fv, _ := v.(float64)
-		base := k
-		if i := strings.Index(k, "|"); i >= 0 {
-			base = k[:i]
-		}
-		dot := strings.LastIndex(base, ".")
-		if dot < 0 {
-			continue
-		}
-		op, kind := base[:dot], base[dot+1:]
-		if ops[op] == nil {
-			ops[op] = &ae{}
-		}
-		switch kind {
-		case "attempt":
-			ops[op].attempt += fv
-			byEl[elementOf(op)] += fv
-			total += fv
-		case "error":
-			ops[op].error += fv
-		}
-	}
-	for _, el := range fiveElements {
-		if total > 0 {
-			st.Pulse[el.Sym] = byEl[el.Sym] / total
-		}
-	}
-	for op, a := range ops {
-		if a.attempt == 0 {
-			continue
-		}
-		r := a.error / a.attempt
-		switch {
-		case r == 0:
-			st.Healthy++
-		case r < 0.30:
-			st.Partial++
-		default:
-			st.Ailing++
-			st.AilOps = append(st.AilOps, op)
-		}
-	}
-	sort.Strings(st.AilOps)
-	return st
-}
-
-// registerDashboard mounts GET /dashboard on mux. svc reads the obs-fleet
-// box of THIS instance (the observation plane). On a business instance with
-// no obs-fleet box it renders an empty-state page.
+// registerDashboard mounts GET /dashboard on mux. svc reads the obs-metrics box
+// of THIS instance (the observation plane). With no obs-metrics box it renders
+// an empty-state page.
 func registerDashboard(mux *http.ServeMux, svc *box.Service, caller string) {
 	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
-		states := collectFleetStates(ctx, svc, caller)
+		snaps := collectSnapshots(ctx, svc, caller)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(renderDashboardHTML(states)))
+		_, _ = w.Write([]byte(renderDashboardHTML(snaps)))
 	})
 }
 
-func collectFleetStates(ctx context.Context, svc *box.Service, caller string) []instanceState {
-	b, err := svc.GetBoxByKey(ctx, caller, "obs-fleet")
+// collectSnapshots reads the obs-metrics box and returns the latest snapshot
+// per instance (by taken_at), sorted by instance.
+func collectSnapshots(ctx context.Context, svc *box.Service, caller string) []snapshot {
+	b, err := svc.GetBoxByKey(ctx, caller, "obs-metrics")
 	if err != nil {
 		return nil
 	}
@@ -162,105 +106,210 @@ func collectFleetStates(ctx context.Context, svc *box.Service, caller string) []
 	if err != nil {
 		return nil
 	}
-	// latest snapshot per instance
-	latest := map[string]box.Item{}
+	latest := map[string]snapshot{}
 	for _, it := range items {
-		var c map[string]any
-		if json.Unmarshal(it.Content, &c) != nil {
+		var s snapshot
+		if json.Unmarshal(it.Content, &s) != nil || s.Instance == "" {
 			continue
 		}
-		inst, _ := c["instance"].(string)
-		ta, _ := c["taken_at"].(string)
-		if cur, ok := latest[inst]; !ok || ta > snapTakenAt(cur) {
-			latest[inst] = it
+		if cur, ok := latest[s.Instance]; !ok || s.TakenAt > cur.TakenAt {
+			latest[s.Instance] = s
 		}
 	}
-	out := []instanceState{}
-	for inst, it := range latest {
-		var c map[string]any
-		_ = json.Unmarshal(it.Content, &c)
-		ta, _ := c["taken_at"].(string)
-		snap, _ := c["snapshot"].(map[string]any)
-		out = append(out, distill(inst, ta, snap))
+	out := make([]snapshot, 0, len(latest))
+	for _, s := range latest {
+		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Instance < out[j].Instance })
 	return out
 }
 
-func snapTakenAt(it box.Item) string {
-	var c map[string]any
-	if json.Unmarshal(it.Content, &c) == nil {
-		if ta, ok := c["taken_at"].(string); ok {
-			return ta
-		}
+func pct(num, den float64) float64 {
+	if den <= 0 {
+		return 0
 	}
-	return ""
+	return 100 * num / den
 }
 
-func renderDashboardHTML(states []instanceState) string {
+func humanBytes(b float64) string {
+	const u = 1024.0
+	switch {
+	case b >= u*u*u:
+		return fmt.Sprintf("%.1fG", b/(u*u*u))
+	case b >= u*u:
+		return fmt.Sprintf("%.1fM", b/(u*u))
+	case b >= u:
+		return fmt.Sprintf("%.1fK", b/u)
+	default:
+		return fmt.Sprintf("%.0fB", b)
+	}
+}
+
+func humanDur(s float64) string {
+	switch {
+	case s >= 86400:
+		return fmt.Sprintf("%.1fd", s/86400)
+	case s >= 3600:
+		return fmt.Sprintf("%.1fh", s/3600)
+	case s >= 60:
+		return fmt.Sprintf("%.0fm", s/60)
+	default:
+		return fmt.Sprintf("%.0fs", s)
+	}
+}
+
+func renderDashboardHTML(snaps []snapshot) string {
 	var b strings.Builder
 	b.WriteString(`<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>box 系统现状 · 觉痕仪表盘</title><style>
-body{background:#0f1115;color:#e6e6e6;font:15px/1.6 -apple-system,system-ui,monospace;margin:0;padding:24px}
+<title>box 观察平面 · 工程指标</title><style>
+body{background:#0f1115;color:#e6e6e6;font:14px/1.55 -apple-system,system-ui,monospace;margin:0;padding:24px}
 h1{font-size:18px;font-weight:600;color:#9ef;margin:0 0 4px}
 .sub{color:#778;font-size:12px;margin-bottom:20px}
-.card{background:#171a21;border:1px solid #232733;border-radius:10px;padding:18px 22px;margin:0 0 16px;max-width:680px}
-.inst{color:#9ef;font-weight:600;margin-bottom:10px}
-.el{display:inline-block;width:128px;margin:2px 0}
-.glyph{color:#5cf;letter-spacing:2px}
-.dim{color:#667}.ok{color:#6e6}.warn{color:#fc6}.bad{color:#f66}
-.big{font-size:15px}
-table{border-collapse:collapse}td{padding:2px 10px 2px 0}
-.legend{color:#667;font-size:11px;margin-top:18px;max-width:680px}
+.card{background:#171a21;border:1px solid #232733;border-radius:10px;padding:16px 20px;margin:0 0 16px;max-width:860px}
+.inst{color:#9ef;font-weight:600;margin-bottom:10px;font-size:15px}
+.down{border-color:#5a2730}.down .inst{color:#f88}
+.sect{color:#9bd;font-size:12px;letter-spacing:.5px;margin:14px 0 6px;text-transform:uppercase}
+.kv{display:inline-block;min-width:150px;margin:2px 14px 2px 0}
+.kv b{color:#cde}.dim{color:#778}
+table{border-collapse:collapse;margin-top:4px;font-size:13px}
+th{text-align:right;color:#89a;font-weight:600;padding:2px 12px 4px 0;border-bottom:1px solid #2a2f3b}
+th.l,td.l{text-align:left}td{text-align:right;padding:2px 12px 2px 0}
+.bad{color:#f66;font-weight:600}.warn{color:#fc6}.ok{color:#6e6}
+.taken{color:#667;font-size:11px;margin-top:12px}
 </style></head><body>`)
-	b.WriteString(`<h1>box 系统现状 · 觉痕仪表盘</h1>`)
-	b.WriteString(`<div class="sub">人机协同观察面 · 符号同源(觉痕/五元素)· 模糊非精确 · 每 30s 自刷新</div>`)
-	if len(states) == 0 {
-		b.WriteString(`<div class="card">◯ 观察平面暂无快照。运行 <code>boxsnap</code>(或等 com.box-metrics timer)把业务实例 obs 拉进 obs-fleet box。</div>`)
+	b.WriteString(`<h1>box 观察平面 · 工程指标</h1>`)
+	b.WriteString(`<div class="sub">真实物理 + 业务数字(obs-metrics 快照)· 舰队 :7777 业务 / :7788 观察 · Fly 不纳入 · 每 30s 自刷新</div>`)
+
+	if len(snaps) == 0 {
+		b.WriteString(`<div class="card">观察平面暂无快照。运行 <code>boxsnap</code>(或等 com.box-metrics timer)采集四类指标落入 obs-metrics box。</div>`)
+		// still flag expected members as down for visibility
+		for _, m := range expectedFleet {
+			fmt.Fprintf(&b, `<div class="card down"><div class="inst">%s — down(无快照)</div></div>`, html.EscapeString(m))
+		}
 		b.WriteString(`</body></html>`)
 		return b.String()
 	}
-	for _, st := range states {
-		b.WriteString(`<div class="card">`)
-		fmt.Fprintf(&b, `<div class="inst">◐ %s</div>`, html.EscapeString(st.Instance))
-		// five-element pulse
-		b.WriteString(`<div class="big">活法 · 五元素脉搏</div><div style="margin:6px 0">`)
-		hot := []string{}
-		for _, el := range fiveElements {
-			g, word := fuzzyBand(st.Pulse[el.Sym])
-			cls := "dim"
-			if word == "盛" || word == "温" {
-				cls = "glyph"
-				hot = append(hot, el.Sym)
-			}
-			fmt.Fprintf(&b, `<span class="el"><b>%s</b> %s <span class="%s">%s</span> %s</span>`,
-				el.Sym, el.Name, cls, g, word)
-		}
-		b.WriteString(`</div>`)
-		phase := strings.Join(hot, "")
-		if phase == "" {
-			phase = "—"
-		}
-		fmt.Fprintf(&b, `<div class="dim" style="margin-bottom:12px">活化态: %s 主导</div>`, phase)
-		// health 觉痕
-		b.WriteString(`<div class="big">健康 · 觉痕</div><div style="margin:6px 0">`)
-		fmt.Fprintf(&b, `<span class="ok">✓ %d 健康</span>&nbsp;&nbsp;`, st.Healthy)
-		fmt.Fprintf(&b, `<span class="warn">~ %d 亚</span>&nbsp;&nbsp;`, st.Partial)
-		ailcls := "ok"
-		if st.Ailing > 0 {
-			ailcls = "bad"
-		}
-		fmt.Fprintf(&b, `<span class="%s">✗ %d 病</span>`, ailcls, st.Ailing)
-		if len(st.AilOps) > 0 {
-			fmt.Fprintf(&b, ` <span class="dim">(%s)</span>`, html.EscapeString(strings.Join(st.AilOps, ", ")))
-		}
-		b.WriteString(`</div>`)
-		fmt.Fprintf(&b, `<div class="dim" style="margin-top:10px">快照 %s</div>`, html.EscapeString(st.TakenAt))
-		b.WriteString(`</div>`)
+
+	seen := map[string]bool{}
+	for _, s := range snaps {
+		seen[s.Instance] = true
+		renderInstance(&b, s)
 	}
-	b.WriteString(`<div class="legend">活力 ●●●盛 ●●○温 ●○○微 ○○○静 · 健康 ✓好 ~亚 ✗病 ◯未用 · 五元素=fengyin 心智(风感知/火判断/土成形/水连接/空治理)· agent 用 boxops/MCP 查同源符号</div>`)
+	// expected-but-absent members → down
+	for _, m := range expectedFleet {
+		if !seen[m] {
+			fmt.Fprintf(&b, `<div class="card down"><div class="inst">%s — down</div><div class="dim">期望成员但最新快照中缺席(未采集到 / 实例下线)。</div></div>`, html.EscapeString(m))
+		}
+	}
 	b.WriteString(`</body></html>`)
 	return b.String()
+}
+
+func renderInstance(b *strings.Builder, s snapshot) {
+	b.WriteString(`<div class="card">`)
+	fmt.Fprintf(b, `<div class="inst">%s <span class="dim">(host %s)</span></div>`,
+		html.EscapeString(s.Instance), html.EscapeString(s.Host))
+
+	// --- capacity 容量 ---
+	c := s.Capacity
+	b.WriteString(`<div class="sect">容量 capacity</div>`)
+	diskPct := pct(c.DiskUsed, c.DiskTotal)
+	dcls := "ok"
+	if diskPct >= 90 {
+		dcls = "bad"
+	} else if diskPct >= 75 {
+		dcls = "warn"
+	}
+	fmt.Fprintf(b, `<span class="kv">磁盘 <b class="%s">%.1f%%</b> <span class="dim">(%s/%s)</span></span>`,
+		dcls, diskPct, humanBytes(c.DiskUsed), humanBytes(c.DiskTotal))
+	fmt.Fprintf(b, `<span class="kv">box_home <b>%s</b></span>`, humanBytes(c.BoxHomeBytes))
+	fmt.Fprintf(b, `<span class="kv">blob <b>%.0f</b> <span class="dim">(%s)</span></span>`, c.BlobCount, humanBytes(c.BlobBytes))
+	fmt.Fprintf(b, `<span class="kv">RSS <b>%.1f MB</b></span>`, c.ProcRSSMb)
+	fmt.Fprintf(b, `<span class="kv">CPU <b>%.1f%%</b></span>`, c.ProcCPU)
+	fmt.Fprintf(b, `<span class="kv">uptime <b>%s</b></span>`, humanDur(c.ProcUptimeS))
+
+	// --- tasks ---
+	t := s.Tasks
+	b.WriteString(`<div class="sect">task 执行</div>`)
+	fmt.Fprintf(b, `<span class="kv">total <b>%d</b></span>`, t.Total)
+	fmt.Fprintf(b, `<span class="kv">完整度 <b>%.0f%%</b></span>`, t.CompletionRate*100)
+	stkcls := "ok"
+	if t.Stuck > 0 {
+		stkcls = "bad"
+	}
+	fmt.Fprintf(b, `<span class="kv">卡住 <b class="%s">%d</b></span>`, stkcls, t.Stuck)
+	if len(t.ByStatus) > 0 {
+		keys := make([]string, 0, len(t.ByStatus))
+		for k := range t.ByStatus {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s:%d", html.EscapeString(k), t.ByStatus[k]))
+		}
+		fmt.Fprintf(b, `<span class="kv">by_status <b>%s</b></span>`, strings.Join(parts, " "))
+	} else {
+		b.WriteString(`<span class="kv dim">by_status —</span>`)
+	}
+
+	// --- perf 性能表 ---
+	b.WriteString(`<div class="sect">性能 perf(请求)</div>`)
+	if len(s.Perf.Ops) == 0 {
+		b.WriteString(`<div class="dim">无 op 计数(进程重启后清零)。</div>`)
+	} else {
+		ops := s.Perf.Ops
+		sort.Slice(ops, func(i, j int) bool { return ops[i].Calls > ops[j].Calls })
+		b.WriteString(`<table><tr><th class="l">op</th><th>calls</th><th>err%</th><th>avg ms</th><th>p95 ms</th><th class="l">err_types</th></tr>`)
+		for _, op := range ops {
+			ecls := ""
+			if op.ErrPct >= 20 {
+				ecls = "bad"
+			} else if op.ErrPct > 0 {
+				ecls = "warn"
+			}
+			et := ""
+			if len(op.ErrTypes) > 0 {
+				ks := make([]string, 0, len(op.ErrTypes))
+				for k := range op.ErrTypes {
+					ks = append(ks, k)
+				}
+				sort.Strings(ks)
+				ps := make([]string, 0, len(ks))
+				for _, k := range ks {
+					ps = append(ps, fmt.Sprintf("%s:%d", html.EscapeString(k), op.ErrTypes[k]))
+				}
+				et = strings.Join(ps, " ")
+			}
+			fmt.Fprintf(b, `<tr><td class="l">%s</td><td>%d</td><td class="%s">%.0f%%</td><td>%.1f</td><td>%.1f</td><td class="l dim">%s</td></tr>`,
+				html.EscapeString(op.Op), op.Calls, ecls, op.ErrPct, op.AvgMs, op.P95Ms, et)
+		}
+		b.WriteString(`</table>`)
+	}
+
+	// --- business 业务表 (per-box) ---
+	bus := s.Business
+	fmt.Fprintf(b, `<div class="sect">业务 business · %d box · %d item</div>`, bus.BoxCount, bus.ItemTotal)
+	if len(bus.PerBox) == 0 {
+		b.WriteString(`<div class="dim">无 per-box 数据。</div>`)
+	} else {
+		pb := bus.PerBox
+		sort.Slice(pb, func(i, j int) bool {
+			if pb[i].Items != pb[j].Items {
+				return pb[i].Items > pb[j].Items
+			}
+			return pb[i].Key < pb[j].Key
+		})
+		b.WriteString(`<table><tr><th class="l">box key</th><th>items</th><th>使用次数</th><th class="l">latest</th></tr>`)
+		for _, p := range pb {
+			fmt.Fprintf(b, `<tr><td class="l">%s</td><td>%d</td><td>%d</td><td class="l dim">%s</td></tr>`,
+				html.EscapeString(p.Key), p.Items, p.Uses, html.EscapeString(p.LatestStoredAt))
+		}
+		b.WriteString(`</table>`)
+	}
+
+	fmt.Fprintf(b, `<div class="taken">快照 %s</div>`, html.EscapeString(s.TakenAt))
+	b.WriteString(`</div>`)
 }

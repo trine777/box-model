@@ -1,69 +1,174 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""boxops — agent 运维入口。连观察平面(默认 :7788),读 obs-fleet box 各
-业务实例的最新快照,输出符号化活化+健康(五元素/觉痕)。与 /dashboard 同
-源数据,这是给运维 agent 的符号面(人看 dashboard,agent 看这个)。
-Env: BOX_ENDPOINT(默认观察平面 :7788)."""
+"""boxops (v2 / R15) — agent 面运维 CLI。连观察平面(默认 :7788),读 obs-metrics
+box 各实例最新快照,输出纯文本数字表(obs_v2_spec a6)。零五元素 / 零觉痕。
+
+每实例一段,四类指标:
+  capacity  机器物理:磁盘 used/total(%)、box_home、blob、proc rss/cpu/uptime
+  tasks     执行完整度:total / by_status / 完整度% / stuck
+  perf      性能:top 操作 calls·err%·avg·p95;按错率高→低、calls 高→低
+  business  业务:box_count / item_total / per-box top(items·uses·更新)
+
+期望成员缺席 -> 标 DOWN。数据全部真实,无符号抽象。
+Env: BOX_ENDPOINT(默认观察平面 :7788)、BOX_FLEET_EXPECT(期望实例,逗号)、BOX_TOKEN."""
 import sys, json, os, urllib.request
+
 EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7788").rstrip("/")
 TOK = os.environ.get("BOX_TOKEN", "")
-_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-ELS = [("风","感知",["get","show","browse","trace","globes","summary","list","legend","neighbor","overview","observ","token_status"]),
-       ("火","判断",["set_symbols","set_box_symbols","finish","abort","set_task","seal"]),
-       ("土","成形",["store","create","replace","append"]),
-       ("水","连接",["blob","upload","download","consume","sync","export","import","items_blob"]),
-       ("空","治理",["gc","manual","lint"])]
-def elem(op):
-    f=op.lower()
-    for s,_,kws in ELS:
-        if any(k in f for k in kws): return s
-    return "风"
-def band(fr):
-    return "●●●" if fr>=0.40 else "●●○" if fr>=0.15 else "●○○" if fr>0 else "○○○"
-def mcp(m,pa,sid=None,notify=False):
-    body={"jsonrpc":"2.0","method":m,"params":pa}
-    if not notify: body["id"]=1
-    h={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
-    if TOK: h["Authorization"]="Bearer "+TOK
-    if sid: h["Mcp-Session-Id"]=sid
-    req=urllib.request.Request(EP+"/mcp",data=json.dumps(body).encode(),headers=h,method="POST")
-    with _op.open(req,timeout=30) as r:
-        ns=r.headers.get("Mcp-Session-Id"); raw=r.read().decode()
-    if notify: return None,ns
+EXPECT = [e.strip() for e in os.environ.get(
+    "BOX_FLEET_EXPECT", "100.83.33.126:7777,100.83.33.126:7788").split(",") if e.strip()]
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 绕代理,免 502
+
+
+def mcp(m, pa, sid=None, notify=False):
+    body = {"jsonrpc": "2.0", "method": m, "params": pa}
+    if not notify:
+        body["id"] = 1
+    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if TOK:
+        h["Authorization"] = "Bearer " + TOK
+    if sid:
+        h["Mcp-Session-Id"] = sid
+    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
+    with _op.open(req, timeout=30) as r:
+        ns = r.headers.get("Mcp-Session-Id")
+        raw = r.read().decode()
+    if notify:
+        return None, ns
     for ln in raw.splitlines():
-        if ln.startswith("data: "): return json.loads(ln[6:]),ns
-    return json.loads(raw),ns
-def tool(sid,n,a):
-    r,_=mcp("tools/call",{"name":n,"arguments":a},sid); res=r.get("result",{})
-    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+        if ln.startswith("data: "):
+            return json.loads(ln[6:]), ns
+    return json.loads(raw), ns
+
+
+def tool(sid, n, a):
+    r, _ = mcp("tools/call", {"name": n, "arguments": a}, sid)
+    res = r.get("result", {})
+    if res.get("isError"):
+        raise RuntimeError(res["content"][0]["text"])
     return json.loads(res["content"][0]["text"])
+
+
+def gb(n):
+    try:
+        return n / (1024.0 ** 3)
+    except Exception:
+        return 0.0
+
+
+def human_age(latest):
+    """ISO -> 简短相对时间。失败回原串。"""
+    if not latest:
+        return "-"
+    import time
+    try:
+        s = latest.split(".")[0].replace("Z", "")
+        t = time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%S"))
+        d = time.time() - t
+        if d < 3600:
+            return f"{int(d/60)}m前"
+        if d < 86400:
+            return f"{int(d/3600)}h前"
+        return f"{int(d/86400)}d前"
+    except Exception:
+        return latest[:10]
+
+
+def render(snap):
+    cap = snap.get("capacity", {})
+    t = snap.get("tasks", {})
+    perf = snap.get("perf", {}).get("ops", [])
+    biz = snap.get("business", {})
+    out = []
+
+    # --- capacity ---
+    du, dt = cap.get("disk_used", 0), cap.get("disk_total", 0)
+    dpct = (100.0 * du / dt) if dt else 0.0
+    out.append("  [容量] disk %5.1f%%  %.1f/%.1fGB | box_home %.1fMB | blob %d (%.1fMB) | "
+               "proc rss %sMB cpu %s%% up %.1fh (%dproc)" % (
+                   dpct, gb(du), gb(dt), cap.get("box_home_bytes", 0) / 1048576.0,
+                   cap.get("blob_count", 0), cap.get("blob_bytes", 0) / 1048576.0,
+                   cap.get("proc_rss_mb", 0), cap.get("proc_cpu", 0),
+                   cap.get("proc_uptime_s", 0) / 3600.0, cap.get("proc_count", 0)))
+
+    # --- tasks ---
+    total = t.get("total", 0)
+    cr = t.get("completion_rate", 0.0)
+    by = t.get("by_status", {})
+    bystr = " ".join("%s%d" % (k, v) for k, v in sorted(by.items(), key=lambda kv: -kv[1])) or "-"
+    durs = t.get("durations_ms", [])
+    davg = (sum(durs) / len(durs) / 1000.0) if durs else 0
+    stuck = t.get("stuck", 0)
+    sflag = "  !! stuck=%d" % stuck if stuck else ""
+    out.append("  [task] total %d  完整度 %4.0f%%  by_status[%s]  avg_dur %.0fs%s" % (
+        total, cr * 100, bystr, davg, sflag))
+
+    # --- perf (top by errors then calls) ---
+    out.append("  [perf] %-24s %5s %5s %6s %5s %5s" % ("op", "calls", "err", "err%", "avg", "p95"))
+    rows = sorted(perf, key=lambda o: (-o.get("err_pct", 0), -o.get("calls", 0)))
+    if not rows:
+        out.append("         (无 counter — 进程重启清零)")
+    for o in rows[:8]:
+        ep = o.get("err_pct", 0)
+        avg = o.get("avg_ms")
+        p95 = o.get("p95_ms")
+        flag = " !" if ep >= 20 else ""
+        ets = o.get("err_types", {})
+        etstr = (" {%s}" % ",".join("%s:%d" % (k, v) for k, v in ets.items())) if ets else ""
+        out.append("         %-24s %5d %5d %5.0f%% %5s %5s%s%s" % (
+            o.get("op", "?")[:24], o.get("calls", 0), o.get("errors", 0), ep,
+            ("%.1f" % avg) if avg else "-", ("%.0f" % p95) if p95 else "-", flag, etstr))
+
+    # --- business ---
+    out.append("  [biz]  boxes %d  items %d   per-box top:" % (
+        biz.get("box_count", 0), biz.get("item_total", 0)))
+    out.append("         %-22s %6s %5s  %s" % ("key", "items", "uses", "updated"))
+    for b in (biz.get("per_box", []) or [])[:8]:
+        out.append("         %-22s %6d %5d  %s" % (
+            (b.get("key") or "?")[:22], b.get("items", 0), b.get("uses", 0),
+            human_age(b.get("latest_stored_at"))))
+    return "\n".join(out)
+
+
 def main():
-    _,sid=mcp("initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"boxops","version":"1.0"}})
-    mcp("notifications/initialized",{},sid,notify=True)
-    try: b=tool(sid,"box_get_box_by_key",{"key":"obs-fleet"})
-    except RuntimeError: print("◯ 观察平面无 obs-fleet box(此端点非观察平面?BOX_ENDPOINT=:7788)"); return
-    items=tool(sid,"box_browse",{"box_id":b["id"],"limit":5000}).get("items",[])
-    latest={}
+    _, sid = mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "boxops", "version": "2.0"}})
+    mcp("notifications/initialized", {}, sid, notify=True)
+    try:
+        b = tool(sid, "box_get_box_by_key", {"key": "obs-metrics"})
+    except RuntimeError:
+        print("(观察平面无 obs-metrics box — 此端点非 :7788? 或 boxsnap 未跑过)")
+        return
+    items = tool(sid, "box_browse", {"box_id": b["id"], "limit": 5000}).get("items", [])
+    latest = {}  # instance -> (taken_at, content)
     for it in items:
-        c=it.get("content")
-        if not isinstance(c,dict): continue
-        inst=c.get("instance","?"); ta=c.get("taken_at","")
-        if inst not in latest or ta>latest[inst][0]: latest[inst]=(ta,c.get("snapshot",{}))
-    if not latest: print("◯ obs-fleet 暂无快照(boxsnap 拉业务 obs)"); return
-    print("box 舰队运维视图 · 观察平面 (agent 面,与 /dashboard 同源)")
-    for inst,(ta,snap) in sorted(latest.items()):
-        cs=snap.get("counters",{}); byel={s:0 for s,_,_ in ELS}; tot=0; ops={}
-        for k,v in cs.items():
-            base=k.split("|",1)[0]
-            if "." not in base: continue
-            op,kind=base.rsplit(".",1); ops.setdefault(op,{"a":0,"e":0})
-            if kind=="attempt": ops[op]["a"]+=v; byel[elem(op)]+=v; tot+=v
-            elif kind=="error": ops[op]["e"]+=v
-        ail=[op for op,d in ops.items() if d["a"] and d["e"]/d["a"]>=0.30]
-        hp=sum(1 for d in ops.values() if d["a"] and d["e"]==0)
-        print(f"─ {inst}  快照 {ta}")
-        pulse=" ".join(f"{s}{band(byel[s]/tot if tot else 0)}" for s,_,_ in ELS)
-        print(f"  活法 {pulse}")
-        v="✗" if ail else "✓"
-        print(f"  健康 {v}  ✓{hp} ✗{len(ail)}" + (f" ({','.join(sorted(ail))})" if ail else ""))
+        c = it.get("content")
+        if not isinstance(c, dict):
+            continue
+        inst = c.get("instance", "?")
+        ta = c.get("taken_at", "")
+        if inst not in latest or ta > latest[inst][0]:
+            latest[inst] = (ta, c)
+    if not latest:
+        print("(obs-metrics 暂无快照 — 先跑 boxsnap)")
+        return
+
+    print("box 舰队运维数字表 · 观察平面 %s (agent 面 · 真实指标 · 零符号)" % EP)
+    seen = set()
+    for inst in sorted(latest, key=lambda i: (i not in EXPECT, i)):
+        ta, snap = latest[inst]
+        seen.add(inst)
+        flag = " [DOWN]" if snap.get("down") else ""
+        print("\n== %s%s   快照 %s" % (inst, flag, ta))
+        if snap.get("down"):
+            print("  实例不可达: %s" % snap.get("error", "?"))
+            print(render(snap))
+        else:
+            print(render(snap))
+    # 期望成员缺席(连快照都没有)
+    for inst in EXPECT:
+        if inst not in seen:
+            print("\n== %s [DOWN]   无任何快照(期望成员缺席)" % inst)
+
+
 main()
