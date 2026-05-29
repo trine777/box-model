@@ -30,6 +30,28 @@ type Box struct {
 	Status        string            `json:"status"`
 	CreatedAt     time.Time         `json:"created_at"`
 	Labels        map[string]string `json:"labels,omitempty"`
+	// Symbols (R13): a box is itself a node on the 符径 — it carries typed
+	// symbols, not just free-form labels. The canonical use is a SymScope
+	// symbol declaring the box's sphere (dev/km/content/…), which makes
+	// naming/grouping receive ValidateSymbol enforcement, box_trace
+	// reachability and legend lookup — unlike the old __op:sphere label
+	// string. Domain/topic symbols on a box are likewise allowed.
+	Symbols []Symbol `json:"symbols,omitempty"`
+}
+
+// BoxScopeOf returns the box's sphere: the value of its first SymScope
+// symbol, falling back to the legacy __op:sphere label during migration.
+// Empty string means "unassigned" (an island).
+func BoxScopeOf(b Box) string {
+	for _, s := range b.Symbols {
+		if s.Kind == SymScope {
+			return s.Value
+		}
+	}
+	if b.Labels != nil {
+		return b.Labels["__op:sphere"]
+	}
+	return ""
 }
 
 type StoragePolicy struct {
@@ -77,6 +99,7 @@ type CreateBoxRequest struct {
 	OwnerID       string
 	StoragePolicy StoragePolicy
 	Labels        map[string]string
+	Symbols       []Symbol // R13: box-level symbols (canonically a SymScope sphere)
 }
 
 // CreateTaskRequest is the schema for Service.CreateTask (R0.10 v2).

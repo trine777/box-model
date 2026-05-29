@@ -47,6 +47,9 @@ type Store interface {
 	// Bumps Box.Version so external watchers can detect the change.
 	// Caller authorisation is enforced at the Service layer (R6 sphere work).
 	UpdateBoxLabels(ctx context.Context, boxID string, labels map[string]string) (Box, error)
+	// UpdateBoxSymbols overwrites a box's Symbols in place (R13). Bumps
+	// Version. Caller authorisation enforced at the Service layer.
+	UpdateBoxSymbols(ctx context.Context, boxID string, symbols []Symbol) (Box, error)
 }
 
 type MemoryStore struct {
@@ -143,6 +146,19 @@ func (s *MemoryStore) UpdateBoxLabels(_ context.Context, id string, labels map[s
 		return Box{}, ErrNotFound
 	}
 	b.Labels = labels
+	b.Version++
+	s.boxes[id] = b
+	return b, nil
+}
+
+func (s *MemoryStore) UpdateBoxSymbols(_ context.Context, id string, symbols []Symbol) (Box, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.boxes[id]
+	if !ok {
+		return Box{}, ErrNotFound
+	}
+	b.Symbols = symbols
 	b.Version++
 	s.boxes[id] = b
 	return b, nil

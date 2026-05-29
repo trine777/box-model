@@ -576,6 +576,26 @@ func (s *FileStore) UpdateBoxLabels(_ context.Context, id string, labels map[str
 	return b, nil
 }
 
+func (s *FileStore) UpdateBoxSymbols(_ context.Context, id string, symbols []Symbol) (Box, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.boxes[id]
+	if !ok {
+		return Box{}, ErrNotFound
+	}
+	b.Symbols = symbols
+	b.Version++
+	data, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return Box{}, err
+	}
+	if err := writeFileAtomic(s.boxJSON(b.Key), data); err != nil {
+		return Box{}, err
+	}
+	s.boxes[id] = b
+	return b, nil
+}
+
 func (s *FileStore) CountItems(_ context.Context, boxID string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

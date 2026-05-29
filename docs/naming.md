@@ -1,17 +1,34 @@
 # Box 命名规范 (Naming Standard)
 
-> SoR for box / item naming. Goal: kill **模糊语义** (random keys nobody can
-> decode) and **孤岛 box** (boxes with no sphere, no owner story). Modeled on
-> data-warehouse layered naming (ods/dwd/dws/ads → here: sphere/domain).
+> SoR for box / item naming. Goal: kill **模糊语义** and **孤岛 box**.
+>
+> **Naming is symbolic, not string-prefix (R13).** Data-warehouse layering
+> (ods/dwd/dws/ads, `<sphere>-<name>`) is just a *模子*. Its premise — a
+> table has only ONE name dimension, so you cram layer/domain/grain into a
+> string prefix — does not hold here. box-model is a **符径 (Symbol Path)**
+> with **7 symbol dimensions** (kind/status/relation/scope/topic/priority/
+> domain). Naming projects meaning onto those symbols; it does NOT compress
+> meaning back into a string. The DW string prefix is a *downgrade* forced
+> by SQL's single name slot — box should *upgrade* to symbols.
 
-## 1. The one hard rule: every box has a sphere
+## 1. The one hard rule: every box carries a SymScope symbol
 
-A box with no `__op:sphere` label is an **island** — `box_globes` dumps it in
-the `(none)` bucket and nobody downstream knows what it's for. **Every box
-MUST carry `__op:sphere` from a controlled vocabulary** (below). This is the
-single rule that, enforced, prevents the mess.
+A box's sphere is a **symbol**, `{kind: scope, value: <sphere>}`, on
+`Box.Symbols` (R13). A box with no scope symbol is an **island** —
+`box_globes` buckets it under `(none)`.
 
-`boxlint` (see §5) flags any box missing a sphere.
+Why a symbol, not a label: the old `__op:sphere` **label** was a free
+string — no `ValidateSymbol` enforcement, no `box_legend` description, not
+reachable by symbol queries, not in the symbol graph. Using a *fuzzy*
+free-string to impose an *anti-fuzz* naming rule is self-contradictory. A
+SymScope symbol gets the controlled-vocab check, legend, and graph
+membership the label never had.
+
+Set it at creation (`box_create_box {symbols:[{kind:scope,value:dev}]}`) or
+via `box_set_box_symbols`. `BoxScopeOf` reads the scope symbol, falling back
+to the legacy `__op:sphere` label only during migration.
+
+`boxlint` (see §5) flags islands AND label-only (un-migrated) boxes.
 
 ## 2. Sphere — the controlled vocabulary (类数仓 domain)
 

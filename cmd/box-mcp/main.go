@@ -258,6 +258,7 @@ func registerTools(srv *mcp.Server, h *handlers) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_observability", Description: "Snapshot of in-memory counters + timers (compact stats). Optional name_prefix filter."}, h.handleObservability)
 	// R6 sphere navigation — multi-globe view + box-level label edits.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_set_box_labels", Description: "Update Labels map on a box (mode: merge|replace). Caller==box.owner gate. R6: assign sphere via __op:sphere label."}, h.handleSetBoxLabels)
+	mcp.AddTool(srv, &mcp.Tool{Name: "box_set_box_symbols", Description: "Set a box's symbols (R13). Canonically a SymScope sphere {kind:scope,value:dev}. ValidateSymbol-checked, caller==owner gate. Supersedes __op:sphere label for naming/governance."}, h.handleSetBoxSymbols)
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_globes", Description: "Multi-sphere overview: group caller-owned boxes by __op:sphere label, return BoxGlyphs + counts per sphere + unassigned bucket."}, h.handleGlobes)
 	// R4.1 self-describing tools — for fresh agents discovering box-mcp.
 	mcp.AddTool(srv, &mcp.Tool{Name: "box_manual", Description: "Return the box-mcp traffic manual (markdown): symbols, 程辙 flow, all tools and example calls."}, h.handleManual)
@@ -951,6 +952,23 @@ type globesInput struct {
 	IncludeUnassigned bool   `json:"include_unassigned,omitempty" jsonschema:"include the no-sphere bucket even if empty (default: include only if non-empty)"`
 	MaxBoxesPerSphere int    `json:"max_boxes_per_sphere,omitempty" jsonschema:"BoxGlyph cap per sphere (default 10)"`
 	SphereLabel       string `json:"sphere_label,omitempty" jsonschema:"override the conventional __op:sphere label key"`
+}
+
+type setBoxSymbolsInput struct {
+	BoxID   string       `json:"box_id" jsonschema:"box id (required)"`
+	Symbols []box.Symbol `json:"symbols" jsonschema:"replacement symbol set; canonically [{kind:scope,value:<sphere>}] (required)"`
+}
+
+func (h *handlers) handleSetBoxSymbols(ctx context.Context, _ *mcp.CallToolRequest, in setBoxSymbolsInput) (*mcp.CallToolResult, any, error) {
+	caller, err := h.resolveCaller(ctx, "", in.BoxID, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := h.svc.SetBoxSymbols(ctx, caller, in.BoxID, in.Symbols)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, out, nil
 }
 
 func (h *handlers) handleGlobes(ctx context.Context, _ *mcp.CallToolRequest, in globesInput) (*mcp.CallToolResult, any, error) {

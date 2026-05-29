@@ -221,6 +221,14 @@ func (s *Service) CreateBox(ctx context.Context, req CreateBoxRequest) (Box, err
 		if err := ValidateLabels(req.Labels); err != nil {
 			return Box{}, err
 		}
+		// R13: validate box-level symbols (each entry shape-checked; a box
+		// canonically carries a SymScope sphere). ValidateSymbol enforces
+		// the per-kind contract (scope value must match [A-Za-z0-9_-]+).
+		for _, sym := range req.Symbols {
+			if err := ValidateSymbol(sym); err != nil {
+				return Box{}, err
+			}
+		}
 		return s.store.CreateBox(ctx, Box{
 			ID:            NewID("box_"),
 			Key:           req.Key,
@@ -231,6 +239,7 @@ func (s *Service) CreateBox(ctx context.Context, req CreateBoxRequest) (Box, err
 			Status:        "active",
 			CreatedAt:     nowUTC(),
 			Labels:        cloneMap(req.Labels),
+			Symbols:       cloneSymbols(req.Symbols),
 		})
 	}()
 
@@ -2028,6 +2037,50 @@ func (s *Service) SetBoxLabels(ctx context.Context, callerID, boxID string, labe
 	return out, nil
 }
 
+// SetBoxSymbols overwrites a box's Symbols (R13). Each entry is
+// ValidateSymbol-checked. Caller-owner gate applies. The canonical use is
+// declaring/changing a box's SymScope sphere:
+//
+//	SetBoxSymbols(ctx, owner, boxID, []Symbol{{Kind: SymScope, Value: "dev"}})
+//
+// Replaces the __op:sphere label approach with a first-class symbol that
+// box_trace can find, box_legend can describe, and ValidateSymbol gates.
+func (s *Service) SetBoxSymbols(ctx context.Context, callerID, boxID string, symbols []Symbol) (Box, error) {
+	tags := map[string]string{}
+	s.obs.Inc("box.set_symbols.attempt", tags)
+	start := time.Now()
+
+	out, err := func() (Box, error) {
+		for _, sym := range symbols {
+			if err := ValidateSymbol(sym); err != nil {
+				return Box{}, err
+			}
+		}
+		b, err := s.store.GetBox(ctx, boxID)
+		if err != nil {
+			return Box{}, err
+		}
+		if b.OwnerID != callerID {
+			return Box{}, forbiddenCallerMismatch(callerID, b.OwnerID)
+		}
+		return s.store.UpdateBoxSymbols(ctx, boxID, cloneSymbols(symbols))
+	}()
+
+	dur := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		errTags := cloneTags(tags)
+		errTags["err_type"] = classifyErr(err)
+		s.obs.Observe("box.set_symbols.duration_ms", dur, errTags)
+		s.obs.Inc("box.set_symbols.error", errTags)
+		s.obs.LogWarn("set_box_symbols failed", "op", "SetBoxSymbols", "box_id", boxID, "err", err.Error(), "err_type", errTags["err_type"])
+		return Box{}, err
+	}
+	s.obs.Observe("box.set_symbols.duration_ms", dur, tags)
+	s.obs.Inc("box.set_symbols.success", tags)
+	s.obs.LogInfo("box symbols updated", "op", "SetBoxSymbols", "box_id", boxID, "symbol_count", len(out.Symbols))
+	return out, nil
+}
+
 // SphereView is one globe in the Globes response: a sphere identifier plus
 // the boxes that declared this sphere via Labels[SphereLabelKey]. Counts
 // is by_kind aggregated across the sphere's boxes (item kinds, not box
@@ -2093,8 +2146,16 @@ func (s *Service) Globes(ctx context.Context, callerID string, opts GlobesOption
 		bySphere := map[string]*SphereView{}
 		var unassigned *SphereView
 		for _, b := range owned {
+			// R13: prefer the SymScope symbol; fall back to the legacy
+			// __op:sphere label (and any custom sphereKey) during migration.
 			sphere := ""
-			if b.Labels != nil {
+			for _, sym := range b.Symbols {
+				if sym.Kind == SymScope {
+					sphere = sym.Value
+					break
+				}
+			}
+			if sphere == "" && b.Labels != nil {
 				sphere = b.Labels[sphereKey]
 			}
 			glyph := s.glyphOf(ctx, b)

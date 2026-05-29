@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""boxlint — scan all boxes, report naming-standard violations (see
-docs/naming.md). Advisory: islands (no sphere), sphere not in vocab, bad
-key shape, missing owner. Exit 1 if any violation."""
+"""boxlint — naming-standard guard (R12/R13). Every box must declare its
+sphere as a SymScope SYMBOL (not just the legacy __op:sphere label). Reports
+islands, label-only (un-migrated), out-of-vocab, bad key, missing owner."""
 import sys, json, os, re, urllib.request
 EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
 TOK = os.environ.get("BOX_TOKEN", "")
@@ -27,7 +27,7 @@ def _tool(sid, n, a):
     if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
     return json.loads(res["content"][0]["text"])
 def main():
-    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxlint", "version": "1.0"}})
+    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxlint", "version": "2.0"}})
     _mcp("notifications/initialized", {}, sid, notify=True)
     g = _tool(sid, "box_globes", {"max_boxes_per_sphere": 10000})
     keys = []
@@ -35,20 +35,25 @@ def main():
     if g.get("unassigned"): keys += [b["key"] for b in g["unassigned"].get("boxes", [])]
     viol = 0
     print(f"{'box':<22} {'verdict'}")
-    print("-" * 50)
+    print("-" * 56)
     for key in sorted(set(keys)):
         b = _tool(sid, "box_get_box_by_key", {"key": key})
         labels = b.get("labels") or {}
-        sphere = labels.get("__op:sphere", "")
+        scope_sym = next((s["value"] for s in (b.get("symbols") or []) if s.get("kind") == "scope"), "")
+        label_sphere = labels.get("__op:sphere", "")
         issues = []
-        if not sphere: issues.append("ISLAND(no sphere)")
-        elif sphere not in SPHERES: issues.append(f"sphere {sphere!r} not in vocab")
+        if scope_sym:
+            if scope_sym not in SPHERES: issues.append(f"scope {scope_sym!r} not in vocab")
+        elif label_sphere:
+            issues.append(f"label-only sphere {label_sphere!r} — migrate to scope symbol")
+        else:
+            issues.append("ISLAND(no scope symbol)")
         if not KEYRE.match(key): issues.append("key not [a-z0-9-]")
         if not b.get("owner_id"): issues.append("no owner_id")
         if issues:
             viol += 1; print(f"{key:<22} ⚠ " + "; ".join(issues))
         else:
-            print(f"{key:<22} ✓ [{sphere}]")
+            print(f"{key:<22} ✓ scope:{scope_sym}")
     print(f"\n{viol} violation(s).")
     sys.exit(1 if viol else 0)
 main()

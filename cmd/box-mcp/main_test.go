@@ -126,6 +126,7 @@ func TestMCPListTools(t *testing.T) {
 		"box_gc_blobs":          true,
 		"box_observability":     true,
 		"box_set_box_labels":    true,
+		"box_set_box_symbols":   true,
 		"box_globes":            true,
 	}
 	got := map[string]bool{}
