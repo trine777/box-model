@@ -305,11 +305,28 @@ For now, **pick one source of truth**. Two-way sync is roadmap.
 
 ## 6 · launchd (Mac autostart)
 
-To keep box-mcp HTTP running on boot under your user account:
+To keep box-mcp HTTP running on boot, auto-restart on crash, and stay
+reachable on your tailnet without per-call tokens (R7), install it as a
+launchd user agent.
+
+Two pieces: a small wrapper script (so the Bearer token lives only in
+`~/.box-api-token`, never in the plist) and the plist itself.
 
 ```bash
+# 1. wrapper — reads token from file, enables --trust-tailnet, prevents
+#    system sleep so tailnet peers stay reachable.
+cat > ~/.local/bin/box-mcp-serve.sh <<'EOF'
+#!/bin/sh
+export BOX_HOME="$HOME/.box"
+export BOX_CALLER="$(whoami)"
+export BOX_API_TOKEN="$(cat "$HOME/.box-api-token")"   # public fallback only
+exec caffeinate -is "$HOME/.local/bin/box-mcp" --http=:7777 --trust-tailnet
+EOF
+chmod +x ~/.local/bin/box-mcp-serve.sh
+
+# 2. plist
 mkdir -p ~/Library/LaunchAgents
-cat > ~/Library/LaunchAgents/com.box-mcp.plist <<'EOF'
+cat > ~/Library/LaunchAgents/com.box-mcp.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -317,15 +334,8 @@ cat > ~/Library/LaunchAgents/com.box-mcp.plist <<'EOF'
   <key>Label</key>             <string>com.box-mcp</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/YOU/.local/bin/box-mcp</string>
-    <string>--http=:8080</string>
+    <string>$HOME/.local/bin/box-mcp-serve.sh</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>BOX_HOME</key>        <string>/Users/YOU/.box</string>
-    <key>BOX_CALLER</key>      <string>YOU</string>
-    <key>BOX_API_TOKEN</key>   <string>PUT-YOUR-TOKEN-HERE</string>
-  </dict>
   <key>RunAtLoad</key>         <true/>
   <key>KeepAlive</key>         <true/>
   <key>StandardOutPath</key>   <string>/tmp/box-mcp.out.log</string>
@@ -338,7 +348,23 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.box-mcp.plist
 launchctl print gui/$(id -u)/com.box-mcp | head -20    # confirm running
 ```
 
+Why this shape:
+- `--trust-tailnet` (R7): tailnet peers reach `http://<your-100.x>:7777/mcp`
+  with **no token**; Tailscale already authenticated them. The
+  `BOX_API_TOKEN` here is only a public fallback (and the Mac is behind NAT,
+  so practically unreachable from the public internet anyway).
+- `caffeinate -is`: keeps the machine awake so the tailnet listener never
+  drops. On a Mac Studio / always-on desktop this is cheap; on a laptop
+  consider dropping it.
+- wrapper keeps the token out of the plist (plist is plaintext in
+  `~/Library`); the token stays in `~/.box-api-token` (chmod 600).
+
 Remove with `launchctl bootout gui/$(id -u)/com.box-mcp`.
+Restart after editing: `launchctl kickstart -k gui/$(id -u)/com.box-mcp`.
+
+> Fly deployments do NOT use this — Fly runs the container with its own
+> `fly.toml`/secrets and stays Bearer-only (it sits behind an L7 proxy,
+> where `--trust-tailnet` would be meaningless; see §9).
 
 ---
 
