@@ -63,6 +63,10 @@ type config struct {
 	// listener is reached directly by tailnet peers (NOT behind an L7 proxy
 	// that rewrites the source IP, e.g. Fly's edge).
 	trustTailnet bool
+	// readOnly (DR replica): when true the Service rejects every write with
+	// box.ErrReadOnlyReplica, pointing callers at the tailnet primary. Set on
+	// the Fly backup mirror via --read-only or $BOX_READ_ONLY=1.
+	readOnly bool
 }
 
 func parseFlags(args []string) (config, error) {
@@ -74,6 +78,7 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.disableObs, "no-obs", false, "disable observability wiring")
 	fs.StringVar(&cfg.httpAddr, "http", "", "serve over Streamable-HTTP at this addr (e.g. :8080); else stdio. $PORT env also taken.")
 	fs.BoolVar(&cfg.trustTailnet, "trust-tailnet", false, "skip Bearer for requests from the Tailscale tailnet (100.64/10, fd7a:115c:a1e0::/48). $BOX_TRUST_TAILNET=1 also enables. Do NOT use behind an L7 proxy.")
+	fs.BoolVar(&cfg.readOnly, "read-only", false, "DR replica mode: reject all writes, point callers to the tailnet primary. $BOX_READ_ONLY=1 also enables.")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -85,6 +90,11 @@ func parseFlags(args []string) (config, error) {
 	if !cfg.trustTailnet {
 		if v := os.Getenv("BOX_TRUST_TAILNET"); v == "1" || v == "true" {
 			cfg.trustTailnet = true
+		}
+	}
+	if !cfg.readOnly {
+		if v := os.Getenv("BOX_READ_ONLY"); v == "1" || v == "true" {
+			cfg.readOnly = true
 		}
 	}
 	return cfg, nil
@@ -140,7 +150,11 @@ func buildService(ctx context.Context, cfg config, stderr io.Writer) (*box.Servi
 		observer = obs.NewMemObserver(stderr, slog.LevelInfo)
 		st.SetObserver(observer)
 	}
-	svc := box.NewService(st, box.WithObserver(observer))
+	opts := []box.ServiceOption{box.WithObserver(observer)}
+	if cfg.readOnly {
+		opts = append(opts, box.WithReadOnly())
+	}
+	svc := box.NewService(st, opts...)
 	if err := svc.EnsureSymbolBootstrap(ctx); err != nil {
 		return nil, nil, fmt.Errorf("symbol bootstrap: %w", err)
 	}

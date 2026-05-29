@@ -157,13 +157,20 @@ func registerItemBlobRoute(mux *http.ServeMux, svc *box.Service, root, defaultCa
 
 // blobHandlers registers /blob/upload, /blob/<sha>, /blob/ (404 catchall) on
 // the supplied mux. The Bearer middleware is applied outside.
-func registerBlobRoutes(mux *http.ServeMux, root string) error {
+func registerBlobRoutes(mux *http.ServeMux, root string, readOnly bool) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("blob root mkdir: %w", err)
 	}
 	mux.HandleFunc("/blob/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		// DR-replica guard: /blob/upload is the only HTTP write path. On the
+		// Fly backup mirror it is rejected with 403 so callers cannot push
+		// bytes that would never propagate to the primary.
+		if readOnly {
+			http.Error(w, box.ErrReadOnlyReplica.Error(), http.StatusForbidden)
 			return
 		}
 		handleBlobUpload(w, r, root)

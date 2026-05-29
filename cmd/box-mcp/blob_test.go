@@ -18,11 +18,17 @@ import (
 // behind the same Bearer middleware production uses. The test caller gets
 // the URL prefix and the temp root back so it can assert on-disk layout.
 func blobServer(t *testing.T) (urlBase, token, root string) {
+	return blobServerMode(t, false)
+}
+
+// blobServerMode mounts the blob routes with the given DR-replica flag so
+// tests can exercise both the writable and the read-only postures.
+func blobServerMode(t *testing.T, readOnly bool) (urlBase, token, root string) {
 	t.Helper()
 	root = t.TempDir()
 	token = "test-bearer-token"
 	sub := http.NewServeMux()
-	if err := registerBlobRoutes(sub, root); err != nil {
+	if err := registerBlobRoutes(sub, root, readOnly); err != nil {
 		t.Fatalf("registerBlobRoutes: %v", err)
 	}
 	mux := http.NewServeMux()
@@ -30,6 +36,27 @@ func blobServer(t *testing.T) (urlBase, token, root string) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv.URL, token, root
+}
+
+// TestBlobUploadReadOnly asserts the DR-replica guard: POST /blob/upload is
+// rejected with 403 and the body points the caller at the primary.
+func TestBlobUploadReadOnly(t *testing.T) {
+	base, tok, _ := blobServerMode(t, true)
+
+	req, _ := http.NewRequest("POST", base+"/blob/upload", strings.NewReader("bytes"))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 in read-only mode, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "read-only DR replica") {
+		t.Fatalf("403 body should mention read-only DR replica, got %q", body)
+	}
 }
 
 func TestBlobUploadRoundtrip(t *testing.T) {

@@ -122,8 +122,22 @@ func (s *Service) autoTrace(ctx context.Context, opts writeOpts, op string, args
 	}
 }
 
+// ErrReadOnlyReplica is returned by every write method when the Service was
+// built with WithReadOnly() (the Fly DR-replica deployment). The message
+// points the caller at the writable primary on the tailnet — this is a
+// technical guard so other agents cannot accidentally write to the one-way
+// backup mirror (writes here would NOT propagate).
+var ErrReadOnlyReplica = errors.New("read-only DR replica: this box-mcp is the Fly backup mirror; writes must target the primary on the tailnet (http://100.83.33.126:7777). Fly is a one-way replica — writes here would NOT propagate. Reconnect to the primary.")
+
 // ServiceOption customizes Service construction (functional options pattern).
 type ServiceOption func(*Service)
+
+// WithReadOnly puts the Service in DR-replica mode: every write method rejects
+// the call up front with ErrReadOnlyReplica, before any validation. Reads are
+// untouched. Enabled on the Fly backup mirror via $BOX_READ_ONLY / --read-only.
+func WithReadOnly() ServiceOption {
+	return func(s *Service) { s.readOnly = true }
+}
 
 // WithObserver installs a non-nil obs.Observer on the Service. A nil observer
 // is silently ignored so callers can wire optional observability without
@@ -142,6 +156,9 @@ func WithObserver(o obs.Observer) ServiceOption {
 type Service struct {
 	store Store
 	obs   obs.Observer
+	// readOnly, when set via WithReadOnly(), makes every write method return
+	// ErrReadOnlyReplica before doing anything. Used by the Fly DR mirror.
+	readOnly bool
 }
 
 // NewService builds a Service over store. Optional ServiceOptions (e.g.
@@ -195,6 +212,9 @@ func cloneTags(in map[string]string) map[string]string {
 }
 
 func (s *Service) CreateBox(ctx context.Context, req CreateBoxRequest) (Box, error) {
+	if s.readOnly {
+		return Box{}, ErrReadOnlyReplica
+	}
 	if req.OwnerType == "" {
 		req.OwnerType = "standalone"
 	}
@@ -289,6 +309,9 @@ func (s *Service) GetBoxByKey(ctx context.Context, callerID, key string) (Box, e
 }
 
 func (s *Service) SealBox(ctx context.Context, callerID, boxID string) error {
+	if s.readOnly {
+		return ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("box.seal.attempt", tags)
 	start := time.Now()
@@ -320,6 +343,9 @@ func (s *Service) SealBox(ctx context.Context, callerID, boxID string) error {
 }
 
 func (s *Service) Store(ctx context.Context, callerID, boxID string, req StoreRequest, writeOpts ...WriteOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	wo := resolveWriteOpts(writeOpts)
 	tags := map[string]string{
 		"box_id":         boxID,
@@ -476,6 +502,9 @@ func (s *Service) GetItem(ctx context.Context, callerID, itemID string) (Item, e
 }
 
 func (s *Service) Consume(ctx context.Context, callerID, itemID string, opts ConsumeOptions, writeOpts ...WriteOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	wo := resolveWriteOpts(writeOpts)
 	consumerType := opts.ConsumerType
 	if consumerType == "" {
@@ -542,6 +571,9 @@ func (s *Service) Consume(ctx context.Context, callerID, itemID string, opts Con
 // Revision=prev.Revision+1, IsLatest=true, RevisionOf=prev.ID. The flip and
 // insert happen atomically inside the store.
 func (s *Service) ReplaceItem(ctx context.Context, callerID, prevItemID string, req StoreRequest, writeOpts ...WriteOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	wo := resolveWriteOpts(writeOpts)
 	tags := map[string]string{"kind": req.Kind}
 	s.obs.Inc("item.replace.attempt", tags)
@@ -666,6 +698,9 @@ func WithAllowHistory(b bool) WriteOption {
 // Default behaviour rejects patches on historical (IsLatest=false) items with
 // ErrConflict. Pass WithAllowHistory(true) to opt in.
 func (s *Service) UpdateLabels(ctx context.Context, callerID, itemID string, labels map[string]string, opts ...UpdateLabelsOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	o := writeOpts{}
 	for _, opt := range opts {
 		opt(&o)
@@ -719,6 +754,9 @@ func (s *Service) UpdateLabels(ctx context.Context, callerID, itemID string, lab
 // Default behaviour rejects patches on historical items; pass
 // WithAllowHistory(true) to opt in.
 func (s *Service) MergeLabels(ctx context.Context, callerID, itemID string, patch map[string]string, opts ...UpdateLabelsOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	o := writeOpts{}
 	for _, opt := range opts {
 		opt(&o)
@@ -775,6 +813,9 @@ func (s *Service) MergeLabels(ctx context.Context, callerID, itemID string, patc
 // Default behaviour rejects mutation on historical items; pass
 // WithAllowHistory(true) to opt in.
 func (s *Service) RemoveLabels(ctx context.Context, callerID, itemID string, keys []string, opts ...UpdateLabelsOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	o := writeOpts{}
 	for _, opt := range opts {
 		opt(&o)
@@ -898,6 +939,9 @@ func (s *Service) GetBox(ctx context.Context, callerID, boxID string) (Box, erro
 // item is absent, ErrConflict if already deleted. Historical (non-latest)
 // versions may also be deleted. Browse and GetItem will then hide the item.
 func (s *Service) DeleteItem(ctx context.Context, callerID, itemID string, writeOpts ...WriteOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	wo := resolveWriteOpts(writeOpts)
 	tags := map[string]string{}
 	s.obs.Inc("item.delete.attempt", tags)
@@ -1347,6 +1391,9 @@ func (s *Service) EnsureSymbolBootstrap(ctx context.Context) error {
 // look inside (R0.13.2 removed the closed-set Kind whitelist that lingered
 // from R0.10 — see invariant #10).
 func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req CreateTaskRequest) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("task.create.attempt", tags)
 	start := time.Now()
@@ -1464,6 +1511,9 @@ func (s *Service) CreateTask(ctx context.Context, callerID, boxID string, req Cr
 // with ErrConflict — pass WithAllowHistory(true) to opt in (mirroring
 // UpdateLabels).
 func (s *Service) SetItemSymbols(ctx context.Context, callerID, itemID string, symbols []Symbol, opts ...UpdateLabelsOption) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	o := writeOpts{}
 	for _, opt := range opts {
 		opt(&o)
@@ -1519,6 +1569,9 @@ func (s *Service) SetItemSymbols(ctx context.Context, callerID, itemID string, s
 // Step.Step is reassigned by the store to "current length". Step.AppendedAt
 // is overwritten to nowUTC().
 func (s *Service) AppendEvent(ctx context.Context, callerID, itemID string, step TraceStep) error {
+	if s.readOnly {
+		return ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("event.append.attempt", tags)
 	start := time.Now()
@@ -1606,6 +1659,9 @@ func (s *Service) ListEvents(ctx context.Context, callerID, itemID string) ([]Tr
 // session. "Active token" just means "this writer's events will auto-attach
 // to that task's trace".
 func (s *Service) StartYiCheng(ctx context.Context, callerID, boxID string, req CreateTaskRequest) (Item, string, error) {
+	if s.readOnly {
+		return Item{}, "", ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("task.start.attempt", tags)
 	start := time.Now()
@@ -1680,6 +1736,9 @@ func (s *Service) StartYiCheng(ctx context.Context, callerID, boxID string, req 
 //
 // statusValue defaults to "✓" when empty.
 func (s *Service) FinishYiCheng(ctx context.Context, token, statusValue, summary string) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("task.finish.attempt", tags)
 	start := time.Now()
@@ -1745,6 +1804,9 @@ func (s *Service) FinishYiCheng(ctx context.Context, token, statusValue, summary
 // Calling AbortYiCheng on an already-revoked token returns ErrNotFound
 // (idempotent retries should treat that as success).
 func (s *Service) AbortYiCheng(ctx context.Context, token, reason string) (Item, error) {
+	if s.readOnly {
+		return Item{}, ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("task.abort.attempt", tags)
 	start := time.Now()
@@ -1991,6 +2053,9 @@ const SphereLabelKey = "__op:sphere"
 //
 //	SetBoxLabels(ctx, owner, boxID, map[string]string{SphereLabelKey: "engineering"}, nil)
 func (s *Service) SetBoxLabels(ctx context.Context, callerID, boxID string, labels map[string]string, mode string) (Box, error) {
+	if s.readOnly {
+		return Box{}, ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("box.set_labels.attempt", tags)
 	start := time.Now()
@@ -2060,6 +2125,9 @@ func (s *Service) SetBoxLabels(ctx context.Context, callerID, boxID string, labe
 // Replaces the __op:sphere label approach with a first-class symbol that
 // box_trace can find, box_legend can describe, and ValidateSymbol gates.
 func (s *Service) SetBoxSymbols(ctx context.Context, callerID, boxID string, symbols []Symbol) (Box, error) {
+	if s.readOnly {
+		return Box{}, ErrReadOnlyReplica
+	}
 	tags := map[string]string{}
 	s.obs.Inc("box.set_symbols.attempt", tags)
 	start := time.Now()

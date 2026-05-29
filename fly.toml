@@ -16,6 +16,10 @@ primary_region = "nrt"
 [env]
   BOX_HOME   = "/data"
   BOX_CALLER = "trine"
+  # DR replica: Fly is a one-way backup mirror of the tailnet primary
+  # (http://100.83.33.126:7777). Reject every write at the Service + blob layer
+  # so other agents cannot accidentally write here (writes would not propagate).
+  BOX_READ_ONLY = "1"
 
 # Persistent KM data. /data is mounted from the box_data Volume.
 [mounts]

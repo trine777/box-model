@@ -19,6 +19,14 @@ const manualMarkdown = `# box-mcp 交通手册 (Traffic Manual)
 > contact assume box-mcp is a database with extra ceremony. It is not.
 > Using it that way will produce confused queries and frustrated retries.
 
+> **环境:别把灾备当正式(读这条再连)。** 核心 / 正式环境 = 本机 tailnet 上的
+> box-mcp ` + "`http://100.83.33.126:7777`" + `(` + "`--trust-tailnet`" + `,tailnet 内**零 token**)。
+> 所有正式读写都走这里。Fly(` + "`https://box-mcp-trine.fly.dev`" + `)是 **DR 灾备只读
+> 镜像** —— Bearer-only,数据从本机**单向同步、可能滞后**,仅供容灾/公网回退。
+> **不要把 Fly 当正式环境写入**(写了也不会回流到本机核心)。不确定时连本机
+> ` + "`:7777`" + `;手册下方 curl 示例用 Fly 端点只是为了演示带 token 的公网握手,
+> tailnet 内请直接用 wrappers,无需 token。
+
 ## Fastest path: the one-line wrappers (R11)
 
 Before hand-rolling the SSE handshake below, know that three shell

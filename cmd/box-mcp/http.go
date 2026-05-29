@@ -45,7 +45,7 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, svc *box.Service,
 		return fmt.Errorf("resolve blob root: %w", err)
 	}
 	blobMux := http.NewServeMux()
-	if err := registerBlobRoutes(blobMux, root); err != nil {
+	if err := registerBlobRoutes(blobMux, root, cfg.readOnly); err != nil {
 		return fmt.Errorf("register blob routes: %w", err)
 	}
 	// R0.23 (F4): observability middleware wraps the blob + items routes so
