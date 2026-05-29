@@ -175,6 +175,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer,
 		return rc.cmdTaskListTrace()
 	case "task_show":
 		return rc.cmdTaskShow()
+	case "export":
+		return rc.cmdExport()
+	case "import":
+		return rc.cmdImport()
 	case "help", "-h", "--help":
 		return cmdHelp(stdout)
 	default:
