@@ -69,7 +69,7 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, svc *box.Service,
 	// gate so a tailnet browser opens it token-free.
 	dashMux := http.NewServeMux()
 	registerDashboard(dashMux, svc, defaultCaller)
-	mux.Handle("/dashboard", withBearer(cfg.trustTailnet, token, dashMux))
+	mux.Handle("/dashboard", withDashboardAuth(cfg.trustTailnet, token, dashMux))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -200,6 +200,25 @@ func isLoopback(remoteAddr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// withDashboardAuth gates ONLY the /dashboard route. It is withBearer plus one
+// extra allowance: a loopback source (127.0.0.1/::1) is let through token-free.
+// Scope is deliberately narrow — the auth posture of /mcp, /blob, /items is
+// unchanged (they keep plain withBearer). The point is purely to let a local
+// browser open http://127.0.0.1:<port>/dashboard without a token: the system
+// HTTP proxy bypasses loopback, so this dodges the CGNAT-proxy 502 that hits
+// tailnet IPs. Safe on Fly: external traffic arrives via the L7 edge, so a
+// request's RemoteAddr is the proxy, never loopback.
+func withDashboardAuth(trustTailnet bool, want string, next http.Handler) http.Handler {
+	bearer := withBearer(trustTailnet, want, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isLoopback(r.RemoteAddr) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		bearer.ServeHTTP(w, r)
+	})
+}
+
 // withBearer wraps next with a constant-time Bearer token check. The "Bearer "
 // prefix is required; anything else returns 401. Healthz is mounted outside
 // this middleware so platforms (fly.io health checks) can probe without
@@ -214,7 +233,7 @@ func withBearer(trustTailnet bool, want string, next http.Handler) http.Handler 
 	const prefix = "Bearer "
 	wantBytes := []byte(want)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isLoopback(r.RemoteAddr) || (trustTailnet && isTailnetSource(r.RemoteAddr)) {
+		if trustTailnet && isTailnetSource(r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}
