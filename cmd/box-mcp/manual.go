@@ -154,6 +154,20 @@ joins, no transactions, no cursors, no roles**. There is:
   ledger. 觉痕 (awareness markers: ✓ / ✗ / ? / → / ~ / ◯) can be overwritten
   by subsequent events.
 
+## Auth: zero-token on your tailnet (R7)
+
+If box-mcp runs with ` + "`--trust-tailnet`" + ` (or ` + "`BOX_TRUST_TAILNET=1`" + `),
+any request whose source IP is on the Tailscale tailnet
+(` + "`100.64.0.0/10`" + ` or ` + "`fd7a:115c:a1e0::/48`" + `) skips the Bearer check
+entirely — Tailscale already authenticated the device when you logged into
+your account and authorised it. **Inside your tailnet you need no token at
+all.** Public (non-tailnet) requests still require the Bearer token, so a
+single deployment serves tailnet agents token-free with a public fallback.
+
+Do NOT enable trust-tailnet behind an L7 proxy that rewrites the source IP
+(e.g. Fly's edge) — the peer there is the proxy, not your device. Fly stays
+Bearer-only; your Mac/tailnet box-mcp runs --trust-tailnet.
+
 ## Auth: two layers (do not skip this)
 
 box-mcp has **two** authorization layers; missing the second is the

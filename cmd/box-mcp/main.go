@@ -56,6 +56,13 @@ type config struct {
 	// the given address instead of stdio. BOX_API_TOKEN is then required for
 	// Bearer auth — the server refuses to start unauthenticated.
 	httpAddr string
+	// trustTailnet (R7): when true, requests whose source IP is on the
+	// Tailscale tailnet (100.64.0.0/10 or fd7a:115c:a1e0::/48) skip the
+	// Bearer check — Tailscale already authenticated the device. Public
+	// (non-tailnet) requests still need the token. Enable ONLY when the
+	// listener is reached directly by tailnet peers (NOT behind an L7 proxy
+	// that rewrites the source IP, e.g. Fly's edge).
+	trustTailnet bool
 }
 
 func parseFlags(args []string) (config, error) {
@@ -66,12 +73,18 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.owner, "owner", "", "default caller identity for tool calls")
 	fs.BoolVar(&cfg.disableObs, "no-obs", false, "disable observability wiring")
 	fs.StringVar(&cfg.httpAddr, "http", "", "serve over Streamable-HTTP at this addr (e.g. :8080); else stdio. $PORT env also taken.")
+	fs.BoolVar(&cfg.trustTailnet, "trust-tailnet", false, "skip Bearer for requests from the Tailscale tailnet (100.64/10, fd7a:115c:a1e0::/48). $BOX_TRUST_TAILNET=1 also enables. Do NOT use behind an L7 proxy.")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
 	if cfg.httpAddr == "" {
 		if port := os.Getenv("PORT"); port != "" {
 			cfg.httpAddr = ":" + port
+		}
+	}
+	if !cfg.trustTailnet {
+		if v := os.Getenv("BOX_TRUST_TAILNET"); v == "1" || v == "true" {
+			cfg.trustTailnet = true
 		}
 	}
 	return cfg, nil

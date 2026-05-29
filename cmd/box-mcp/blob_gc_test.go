@@ -229,7 +229,7 @@ func TestItemBlobDownloadRoute(t *testing.T) {
 	mux := http.NewServeMux()
 	itemSub := http.NewServeMux()
 	registerItemBlobRoute(itemSub, r.svc, r.blobs, r.caller)
-	mux.Handle("/items/", withBearer(tok, itemSub))
+	mux.Handle("/items/", withBearer(false, tok, itemSub))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

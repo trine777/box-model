@@ -26,7 +26,7 @@ func blobServer(t *testing.T) (urlBase, token, root string) {
 		t.Fatalf("registerBlobRoutes: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/blob/", withBearer(token, sub))
+	mux.Handle("/blob/", withBearer(false, token, sub))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv.URL, token, root

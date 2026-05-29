@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -34,7 +35,7 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, svc *box.Service,
 	}
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
-	authedMCP := withBearer(token, mcpHandler)
+	authedMCP := withBearer(cfg.trustTailnet, token, mcpHandler)
 
 	// R0.18: local-FS blob layer mounted alongside the MCP routes. Routes
 	// register on a sub-mux so we can put the whole thing behind the same
@@ -51,13 +52,13 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, svc *box.Service,
 	// box_observability can show /blob/upload / /items/<id>/blob traffic too,
 	// not just MCP-tool calls. Bearer is outermost so 401s don't pollute the
 	// metric stream.
-	authedBlob := withBearer(token, withObs(observer, "http.blob", blobMux))
+	authedBlob := withBearer(cfg.trustTailnet, token, withObs(observer, "http.blob", blobMux))
 
 	// R0.19: /items/<id>/blob is the one-shot download path for external
 	// callers that hold only an item id. Same Bearer middleware.
 	itemMux := http.NewServeMux()
 	registerItemBlobRoute(itemMux, svc, root, defaultCaller)
-	authedItem := withBearer(token, withObs(observer, "http.items_blob", itemMux))
+	authedItem := withBearer(cfg.trustTailnet, token, withObs(observer, "http.items_blob", itemMux))
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", authedMCP)
@@ -136,14 +137,66 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
+// tailscaleNets are the address ranges Tailscale assigns to tailnet devices:
+// the IPv4 CGNAT block (100.64.0.0/10) and the IPv6 ULA block
+// (fd7a:115c:a1e0::/48). A request whose source IP falls in either range
+// has already been authenticated by Tailscale at the network layer — the
+// device is on your tailnet because you logged into your Tailscale account
+// and authorised it. R7 trust-tailnet mode treats that as sufficient and
+// skips the Bearer check, eliminating per-call token friction inside the
+// tailnet (the actual work-blocking pain point).
+var tailscaleNets = func() []*net.IPNet {
+	out := []*net.IPNet{}
+	for _, cidr := range []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
+// isTailnetSource reports whether remoteAddr (host:port form from
+// http.Request.RemoteAddr) is a Tailscale tailnet address. Direct
+// connections (the only mode trust-tailnet is meant for) carry the real
+// peer IP here. NOTE: do NOT enable trust-tailnet behind an L7 proxy that
+// rewrites RemoteAddr (e.g. Fly's edge) — there the peer is the proxy, not
+// the tailnet device, and the check would be meaningless. Fly stays
+// Bearer-only.
+func isTailnetSource(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr // already bare (some test paths)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range tailscaleNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // withBearer wraps next with a constant-time Bearer token check. The "Bearer "
 // prefix is required; anything else returns 401. Healthz is mounted outside
 // this middleware so platforms (fly.io health checks) can probe without
 // credentials.
-func withBearer(want string, next http.Handler) http.Handler {
+//
+// R7: when trustTailnet is true, requests whose source IP is on the
+// Tailscale tailnet bypass the Bearer check entirely — Tailscale already
+// authenticated the device. Non-tailnet (public) requests still require the
+// token, so a single deployment can serve tailnet agents token-free while
+// keeping a public Bearer fallback.
+func withBearer(trustTailnet bool, want string, next http.Handler) http.Handler {
 	const prefix = "Bearer "
 	wantBytes := []byte(want)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if trustTailnet && isTailnetSource(r.RemoteAddr) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		got := r.Header.Get("Authorization")
 		if !strings.HasPrefix(got, prefix) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
