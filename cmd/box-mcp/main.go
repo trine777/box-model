@@ -279,6 +279,7 @@ type createBoxInput struct {
 	OwnerID   string             `json:"owner_id,omitempty"`
 	Policy    *box.StoragePolicy `json:"storage_policy,omitempty"`
 	Labels    map[string]string  `json:"labels,omitempty"`
+	Symbols   []box.Symbol       `json:"symbols,omitempty"` // R14 fix: expose R13 box symbols (canonically scope sphere) at creation
 }
 
 type getBoxByKeyInput struct {
@@ -470,6 +471,7 @@ func (h *handlers) handleCreateBox(ctx context.Context, _ *mcp.CallToolRequest, 
 		OwnerType: in.OwnerType,
 		OwnerID:   in.OwnerID,
 		Labels:    in.Labels,
+		Symbols:   in.Symbols,
 	}
 	if in.Policy != nil {
 		req.StoragePolicy = *in.Policy

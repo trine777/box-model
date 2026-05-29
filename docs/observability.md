@@ -94,3 +94,31 @@ Counter + 可选 slog JSON 日志)。`Service` 每个动词埋点
 - 排查具体:`boxstat <prefix>`(精确数)。
 - 看趋势:`boxtrend`(节律,需 metrics box 攒够快照)。
 - 一个 ✗ / 一段持续沉寂(全 ◯)就是该迭代的信号 —— 模糊够用,不必精确。
+
+## 七、双平面与人机协同观察(R14)
+
+观察体系与业务体系**解耦为两个 box-mcp 实例**,避免观察写入污染业务
+counter(自指),也让开发 agent 与运维 agent 上下文分离。
+
+| 平面 | 实例 | 角色 | launchd |
+| --- | --- | --- | --- |
+| 业务平面 | `:7777` / `~/.box` | 核心服务(本机为主,Fly 为备份) | `com.box-mcp` |
+| 观察平面 | `:7788` / `~/.box-obs` | 运维数据面(`obs-fleet` box 攒舰队快照) | `com.box-obs` |
+
+数据流:`boxsnap`(v2)拉**业务平面** `box_observability` → 写**观察平面**
+`obs-fleet` box(切自指)。三类消费者读观察平面,**同源符号**(觉痕/五元素):
+
+| 入口 | 受众 | 形态 |
+| --- | --- | --- |
+| `boxops` | 运维 agent | CLI 符号:舰队五元素脉搏 + 觉痕健康 |
+| `boxboard` | 人 | 终端 ASCII + 本地 HTML(`open file://`)+ markdown 留痕落 `obs-fleet` |
+| `GET /dashboard` | 人(浏览器) | HTML 觉痕仪表盘,30s 自刷新,tailnet token-free |
+
+**502 绕代理**:浏览器经系统代理(如 Clash/Surge 127.0.0.1:7890)直连 tailnet
+IP 会 502(代理不路由 CGNAT 段)。`boxboard` 用 `ProxyHandler({})` 抓
+`/dashboard` 写本地文件再 `open file://` —— 绕开代理,人可观察不被代理卡住。
+
+> 锻造来源:本平面以真实钉 `data_engineering_forge/data_observability_setup`
+> (a1 提取需求 → a2 设计策略 → a3 生成配置 → a4 验证覆盖)锻造,完工经
+> `system_core/world_modeler` 落回 `box_operation_v3` 世界模型(符号同源原则
+> 的元层兑现:观察体系自己也走 nail SOP + WM 落回)。

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""boxops — agent 运维入口。连观察平面(默认 :7788),读 obs-fleet box 各
+业务实例的最新快照,输出符号化活化+健康(五元素/觉痕)。与 /dashboard 同
+源数据,这是给运维 agent 的符号面(人看 dashboard,agent 看这个)。
+Env: BOX_ENDPOINT(默认观察平面 :7788)."""
+import sys, json, os, urllib.request
+EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7788").rstrip("/")
+TOK = os.environ.get("BOX_TOKEN", "")
+_op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+ELS = [("风","感知",["get","show","browse","trace","globes","summary","list","legend","neighbor","overview","observ","token_status"]),
+       ("火","判断",["set_symbols","set_box_symbols","finish","abort","set_task","seal"]),
+       ("土","成形",["store","create","replace","append"]),
+       ("水","连接",["blob","upload","download","consume","sync","export","import","items_blob"]),
+       ("空","治理",["gc","manual","lint"])]
+def elem(op):
+    f=op.lower()
+    for s,_,kws in ELS:
+        if any(k in f for k in kws): return s
+    return "风"
+def band(fr):
+    return "●●●" if fr>=0.40 else "●●○" if fr>=0.15 else "●○○" if fr>0 else "○○○"
+def mcp(m,pa,sid=None,notify=False):
+    body={"jsonrpc":"2.0","method":m,"params":pa}
+    if not notify: body["id"]=1
+    h={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+    if TOK: h["Authorization"]="Bearer "+TOK
+    if sid: h["Mcp-Session-Id"]=sid
+    req=urllib.request.Request(EP+"/mcp",data=json.dumps(body).encode(),headers=h,method="POST")
+    with _op.open(req,timeout=30) as r:
+        ns=r.headers.get("Mcp-Session-Id"); raw=r.read().decode()
+    if notify: return None,ns
+    for ln in raw.splitlines():
+        if ln.startswith("data: "): return json.loads(ln[6:]),ns
+    return json.loads(raw),ns
+def tool(sid,n,a):
+    r,_=mcp("tools/call",{"name":n,"arguments":a},sid); res=r.get("result",{})
+    if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
+    return json.loads(res["content"][0]["text"])
+def main():
+    _,sid=mcp("initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"boxops","version":"1.0"}})
+    mcp("notifications/initialized",{},sid,notify=True)
+    try: b=tool(sid,"box_get_box_by_key",{"key":"obs-fleet"})
+    except RuntimeError: print("◯ 观察平面无 obs-fleet box(此端点非观察平面?BOX_ENDPOINT=:7788)"); return
+    items=tool(sid,"box_browse",{"box_id":b["id"],"limit":5000}).get("items",[])
+    latest={}
+    for it in items:
+        c=it.get("content")
+        if not isinstance(c,dict): continue
+        inst=c.get("instance","?"); ta=c.get("taken_at","")
+        if inst not in latest or ta>latest[inst][0]: latest[inst]=(ta,c.get("snapshot",{}))
+    if not latest: print("◯ obs-fleet 暂无快照(boxsnap 拉业务 obs)"); return
+    print("box 舰队运维视图 · 观察平面 (agent 面,与 /dashboard 同源)")
+    for inst,(ta,snap) in sorted(latest.items()):
+        cs=snap.get("counters",{}); byel={s:0 for s,_,_ in ELS}; tot=0; ops={}
+        for k,v in cs.items():
+            base=k.split("|",1)[0]
+            if "." not in base: continue
+            op,kind=base.rsplit(".",1); ops.setdefault(op,{"a":0,"e":0})
+            if kind=="attempt": ops[op]["a"]+=v; byel[elem(op)]+=v; tot+=v
+            elif kind=="error": ops[op]["e"]+=v
+        ail=[op for op,d in ops.items() if d["a"] and d["e"]/d["a"]>=0.30]
+        hp=sum(1 for d in ops.values() if d["a"] and d["e"]==0)
+        print(f"─ {inst}  快照 {ta}")
+        pulse=" ".join(f"{s}{band(byel[s]/tot if tot else 0)}" for s,_,_ in ELS)
+        print(f"  活法 {pulse}")
+        v="✗" if ail else "✓"
+        print(f"  健康 {v}  ✓{hp} ✗{len(ail)}" + (f" ({','.join(sorted(ail))})" if ail else ""))
+main()

@@ -65,6 +65,11 @@ func runHTTP(ctx context.Context, cfg config, srv *mcp.Server, svc *box.Service,
 	mux.Handle("/mcp/", authedMCP) // trailing-slash variant some clients send
 	mux.Handle("/blob/", authedBlob)
 	mux.Handle("/items/", authedItem)
+	// R14: human-observable dashboard (HTML). Same trust-tailnet Bearer
+	// gate so a tailnet browser opens it token-free.
+	dashMux := http.NewServeMux()
+	registerDashboard(dashMux, svc, defaultCaller)
+	mux.Handle("/dashboard", withBearer(cfg.trustTailnet, token, dashMux))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

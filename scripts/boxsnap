@@ -1,40 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""boxsnap — capture a box_observability snapshot and persist it as an item
-in the `metrics` box (so usage metrics survive server restarts and become
-observable over time). Run on a timer."""
-import sys, json, os, time, urllib.request
-EP = os.environ.get("BOX_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+"""boxsnap (v2) — pull a business instance's obs, write the snapshot into the
+OBSERVATION plane's obs-fleet box. Writing on a SEPARATE instance breaks the
+self-reference: the business plane's obs is no longer polluted by the snapshot
+write. Env: BOX_BIZ_ENDPOINT (default :7777), BOX_OBS_ENDPOINT (default :7788),
+BOX_INSTANCE (label)."""
+import json, os, time, urllib.request
+BIZ = os.environ.get("BOX_BIZ_ENDPOINT", "http://100.83.33.126:7777").rstrip("/")
+OBS = os.environ.get("BOX_OBS_ENDPOINT", "http://100.83.33.126:7788").rstrip("/")
+INST = os.environ.get("BOX_INSTANCE", BIZ.split("//")[-1])
 TOK = os.environ.get("BOX_TOKEN", "")
 _op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-def _mcp(method, params, sid=None, notify=False):
-    body = {"jsonrpc": "2.0", "method": method, "params": params}
-    if not notify: body["id"] = 1
-    h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    if TOK: h["Authorization"] = "Bearer " + TOK
-    if sid: h["Mcp-Session-Id"] = sid
-    req = urllib.request.Request(EP + "/mcp", data=json.dumps(body).encode(), headers=h, method="POST")
-    with _op.open(req, timeout=30) as r:
-        ns = r.headers.get("Mcp-Session-Id"); raw = r.read().decode()
-    if notify: return None, ns
+def mcp(ep, m, pa, sid=None, notify=False):
+    body={"jsonrpc":"2.0","method":m,"params":pa}
+    if not notify: body["id"]=1
+    h={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+    if TOK: h["Authorization"]="Bearer "+TOK
+    if sid: h["Mcp-Session-Id"]=sid
+    req=urllib.request.Request(ep+"/mcp",data=json.dumps(body).encode(),headers=h,method="POST")
+    with _op.open(req,timeout=30) as r:
+        ns=r.headers.get("Mcp-Session-Id"); raw=r.read().decode()
+    if notify: return None,ns
     for ln in raw.splitlines():
-        if ln.startswith("data: "): return json.loads(ln[6:]), ns
-    return json.loads(raw), ns
-def _tool(sid, n, a):
-    r, _ = _mcp("tools/call", {"name": n, "arguments": a}, sid); res = r.get("result", {})
+        if ln.startswith("data: "): return json.loads(ln[6:]),ns
+    return json.loads(raw),ns
+def sess(ep):
+    _,sid=mcp(ep,"initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"boxsnap","version":"2.0"}})
+    mcp(ep,"notifications/initialized",{},sid,notify=True); return sid
+def tool(ep,sid,n,a):
+    r,_=mcp(ep,"tools/call",{"name":n,"arguments":a},sid); res=r.get("result",{})
     if res.get("isError"): raise RuntimeError(res["content"][0]["text"])
     return json.loads(res["content"][0]["text"])
 def main():
-    _, sid = _mcp("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "boxsnap", "version": "1.0"}})
-    _mcp("notifications/initialized", {}, sid, notify=True)
-    snap = _tool(sid, "box_observability", {})
-    b = _tool(sid, "box_get_box_by_key", {"key": "metrics"})
-    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    ncount = len(snap.get("counters", {}))
-    item = _tool(sid, "box_store", {"box_id": b["id"], "kind": "O", "source_type": "observability",
-        "storage_uri": "row://metrics/" + ts, "idem_key": "snap-" + ts, "format": "json",
-        "content": snap,
-        "labels": {"__op:sphere": "ops", "snapshot_at": ts, "counter_families": str(ncount)},
-        "symbols": [{"kind": "kind", "value": "O"}, {"kind": "topic", "value": "usage-snapshot"}]})
-    print(f"snapshot {ts}: {ncount} counter families → metrics/{item['id'][:18]}")
+    bsid=sess(BIZ); snap=tool(BIZ,bsid,"box_observability",{})
+    osid=sess(OBS); fb=tool(OBS,osid,"box_get_box_by_key",{"key":"obs-fleet"})
+    ts=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    item=tool(OBS,osid,"box_store",{"box_id":fb["id"],"kind":"O","source_type":"observability",
+        "storage_uri":f"row://fleet/{INST}/{ts}","idem_key":f"snap-{INST}-{ts}","format":"json",
+        "content":{"instance":INST,"taken_at":ts,"snapshot":snap},
+        "labels":{"__op:sphere":"ops","instance":INST,"snapshot_at":ts},
+        "symbols":[{"kind":"kind","value":"O"},{"kind":"scope","value":"ops"},{"kind":"topic","value":"fleet-snapshot"}]})
+    print(f"snapshot [{INST}] {ts}: {len(snap.get('counters',{}))} counters → obs-plane (self-ref cut)")
 main()
